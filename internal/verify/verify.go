@@ -2,6 +2,7 @@ package verify
 
 import (
 	"context"
+	"fmt"
 	"database/sql"
 	"encoding/json"
 	"log"
@@ -41,6 +42,7 @@ func (s *Server) Start() {
 	// Format: GET /verify-resource/<table>/<id>
 	mux.HandleFunc("/verify-resource/", s.handleVerifyResource)
 
+	mux.HandleFunc("/table/", s.handleTable)
 	mux.HandleFunc("/health", s.handleHealth)
 
 	addr := ":" + s.port
@@ -309,4 +311,171 @@ func (s *Server) handleVerify(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+}
+
+
+// handleTable melayani GET /table/<table> untuk mengambil semua baris dari tabel
+func (s *Server) handleTable(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if s.verifyToken != "" {
+		got := r.Header.Get("Authorization")
+		if got != "Bearer "+s.verifyToken {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+	}
+
+	path := strings.TrimPrefix(r.URL.Path, "/table/")
+	if path == "" || strings.Contains(path, "/") {
+		http.Error(w, "format path harus /table/<table>", http.StatusBadRequest)
+		return
+	}
+
+	tableName := path
+	records := s.queryTable(r.Context(), tableName)
+    if records == nil {
+        records = []ResourceRecord{}
+    }
+	
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(records)
+}
+
+// queryTable mengambil seluruh baris dari tabel
+func (s *Server) queryTable(ctx context.Context, tableName string) []ResourceRecord {
+	if !IsValidSQLIdentifier(tableName) {
+		log.Printf("[VerifyServer] Nama tabel tidak valid: %s", tableName)
+		return nil
+	}
+
+	if s.db == nil {
+		return nil
+	}
+
+	var owner, actualTableName string
+	err := s.db.QueryRowContext(ctx, `
+		SELECT owner, table_name 
+		FROM (
+			SELECT owner, table_name 
+			FROM all_tables 
+			WHERE UPPER(table_name) = UPPER(:1)
+			ORDER BY CASE WHEN owner = USER THEN 0 ELSE 1 END, owner
+		)
+		WHERE rownum = 1
+	`, tableName).Scan(&owner, &actualTableName)
+	
+	if err != nil {
+		log.Printf("[VerifyServer] Tabel tidak ditemukan: %s", tableName)
+		return nil
+	}
+
+	pkCol := s.findOraclePrimaryKey(ctx, owner, actualTableName)
+	if pkCol == "" {
+		pkCandidates := []string{"ogc_fid", "id", "_id", "fid", "gid", "objectid"}
+		pkCol = s.findPKColumn(ctx, owner, actualTableName, pkCandidates)
+	}
+
+	if pkCol == "" {
+		return nil
+	}
+
+	query := `
+		SELECT column_name 
+		FROM all_tab_columns 
+		WHERE UPPER(table_name) = UPPER(:1) 
+		AND owner = :2
+		AND data_type NOT IN ('SDO_GEOMETRY', 'BLOB', 'CLOB', 'RAW', 'LONG')
+		ORDER BY column_id
+	`
+	rows, err := s.db.QueryContext(ctx, query, actualTableName, owner)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+
+	var columns []string
+	for rows.Next() {
+		var col string
+		if err := rows.Scan(&col); err == nil && IsValidSQLIdentifier(col) {
+			columns = append(columns, col)
+		}
+	}
+
+	if len(columns) == 0 {
+		return nil
+	}
+
+	colList := ""
+	pkIndex := -1
+	for i, col := range columns {
+		if i > 0 {
+			colList += ", "
+		}
+		colList += `"` + col + `"`
+		if strings.EqualFold(col, pkCol) {
+			pkIndex = i
+		}
+	}
+    if pkIndex == -1 {
+        colList = `"` + pkCol + `", ` + colList
+    }
+
+	dataQuery := `SELECT ` + colList + ` FROM "` + owner + `"."` + actualTableName + `"`
+	dataRows, err := s.db.QueryContext(ctx, dataQuery)
+	if err != nil {
+		return nil
+	}
+	defer dataRows.Close()
+
+	cols, err := dataRows.Columns()
+	if err != nil {
+		return nil
+	}
+
+	var records []ResourceRecord
+
+	for dataRows.Next() {
+		values := make([]interface{}, len(cols))
+		valuePtrs := make([]interface{}, len(cols))
+		for i := range values {
+			valuePtrs[i] = &values[i]
+		}
+
+		if err := dataRows.Scan(valuePtrs...); err != nil {
+			continue
+		}
+
+		data := make(map[string]interface{})
+		var id string
+		for i, colName := range cols {
+			val := values[i]
+			if b, ok := val.([]byte); ok {
+				data[colName] = string(b)
+			} else {
+				data[colName] = val
+			}
+
+			if strings.EqualFold(colName, pkCol) {
+				if b, ok := val.([]byte); ok {
+					id = string(b)
+				} else {
+					id = fmt.Sprintf("%v", val)
+				}
+			}
+		}
+
+		records = append(records, ResourceRecord{
+			Found:     true,
+			Table:     tableName,
+			ID:        id,
+			Data:      data,
+			CheckedAt: time.Now(),
+		})
+	}
+
+	return records
 }
