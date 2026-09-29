@@ -1,49 +1,44 @@
 # auditchain-agent
 
-Event publisher agent untuk AuditChain Gateway. Dipasang di sisi klien untuk membaca perubahan database secara otomatis dan mengirimkannya ke AuditChain Gateway tanpa menyentuh kode aplikasi klien.
+Agent AuditChain di sisi client untuk verifikasi database Oracle dan direct
+recovery yang sempit, terautentikasi, ber-policy, serta idempoten. Recovery
+write disabled secara default dan tidak menggantikan finalisasi Gateway melalui
+CDC, Merkle proof, dan Fabric.
 
 ## Cara Kerja
 
 ```
-[Database Klien] → polling setiap N detik → [Agent] → POST /api/v1/logs → [Gateway]
+[Gateway] → GET /verify/:table/:id → [Agent] → [Oracle Client DB]
+[Gateway] → POST /recover/:table/:id → [Agent] → [Oracle Client DB]
+[Oracle Client DB] → Debezium/CDC → [Gateway] → Merkle/Fabric confirmation
 ```
 
-Agent membaca baris yang berubah berdasarkan kolom `modified_at`, lalu mengirimkan sebagai bulk log ke Gateway API.
+Recovery menghasilkan perubahan row normal agar dapat ditangkap Debezium/CDC;
+Agent tidak mengirim callback final recovery ke Gateway.
 
 ## Prasyarat
 
-- Go 1.24+
-- Akses ke database sumber (PostgreSQL)
-- API Key dari AuditChain Gateway
+- Go 1.25+
+- Akses ke database sumber Oracle
+- `AGENT_VERIFY_TOKEN` untuk read endpoint
+- `AGENT_RECOVERY_TOKEN`, `AGENT_CLIENT_ID`, dan policy lokal hanya bila
+  recovery pilot diaktifkan
 
 ## Konfigurasi
 
-Salin dan sesuaikan `config.yml`:
+Salin dan sesuaikan `config.yml` serta environment. `config.yml` hanya
+menyimpan konfigurasi non-secret; gunakan `.env.example` sebagai daftar
+variabel runtime:
 
 ```yaml
-client:
-  api_key: "ak_live_xxxxxxxxxxxx"   # dari POST /api/admin/clients
-
-source_db:
-  host: "localhost"
-  port: 5434
-  user: "simrs"
-  password: "simrs123"
-  dbname: "simrs_db"
-
-gateway:
-  url: "http://192.168.11.94:8080"
-
-polling:
-  interval_seconds: 5
-  batch_size: 50
-
 tables:
   - name: pasien
-    actor_field: modified_by
-    resource_field: no_rm
     source_system: SIMRS-Pasien
 ```
+
+Untuk recovery, copy `recovery-policy.example.yml` menjadi policy lokal yang
+sudah direview. Policy harus exact dan tidak boleh memuat credential, password,
+token, secret, binary, LOB, generated, atau virtual column.
 
 ## Menjalankan
 
@@ -67,6 +62,6 @@ go build -o auditchain-agent main.go
 
 ## Syarat Database Sumber
 
-Tabel yang dimonitor harus memiliki kolom `modified_at TIMESTAMPTZ` yang terupdate otomatis setiap ada perubahan.
-
-Database juga harus memiliki tabel `agent_checkpoints` untuk tracking posisi polling — sudah dibuat otomatis oleh `init.sql` di repo `auditchain-simrs-dummy`.
+Direct recovery tidak membuat tabel baru di database client. Tabel pilot harus
+memiliki primary key stabil dan mapping kolom yang sama dengan projection yang
+dipakai Gateway untuk canonical state/hash.

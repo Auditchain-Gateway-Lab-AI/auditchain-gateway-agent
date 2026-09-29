@@ -125,3 +125,29 @@ func TestHandleVerify_Auth(t *testing.T) {
 		t.Errorf("expected bad request (400), got %v", rr2.Code)
 	}
 }
+
+func TestHandleVerify_DatabaseFailureIsNotFoundFalse(t *testing.T) {
+	server := NewServer(nil, "secret-token", "9090")
+	req, err := http.NewRequest(http.MethodGet, "/verify/users/1", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer secret-token")
+	rr := httptest.NewRecorder()
+	server.handleVerify(rr, req)
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected database_unreachable 503, got %d body=%s", rr.Code, rr.Body.String())
+	}
+	if rr.Body.String() == "{\"found\":false}" {
+		t.Fatal("database failure must not be reported as a missing row")
+	}
+}
+
+func TestTableEndpointDisabledByDefault(t *testing.T) {
+	server := NewServer(nil, "", "9090")
+	rr := httptest.NewRecorder()
+	server.Handler().ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/table/users", nil))
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("expected disabled table endpoint 404, got %d", rr.Code)
+	}
+}

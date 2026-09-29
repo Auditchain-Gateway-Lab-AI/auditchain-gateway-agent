@@ -1,0 +1,4 @@
+# Intentionally empty fail-closed policy for the default disabled deployment.
+# Replace with an approved exact pilot policy before enabling recovery.
+version: 1
+tables: []
