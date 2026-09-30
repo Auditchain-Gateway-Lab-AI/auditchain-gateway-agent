@@ -1,0 +1,54 @@
+# Copy to recovery-policy.yml and replace the pilot mapping after schema review.
+# Do not add credential, password, token, secret, binary, or LOB columns.
+version: 1
+tables:
+  - resource_table: RUANGAN
+    schema: POLINEMA
+    table: RUANGAN
+    primary_key_field: id
+    primary_key_column: ID
+    primary_key_type: string
+    operations: [UPSERT, DELETE]
+    columns:
+      id:
+        database_column: ID
+        state: true
+        insert: true
+        update: false
+        immutable: true
+      nama:
+        database_column: NAMA
+        state: true
+        insert: true
+        update: true
+      aktif:
+        database_column: AKTIF
+        state: true
+        insert: true
+        update: true
+      id_unit:
+        database_column: ID_UNIT
+        state: true
+        insert: true
+        update: true
+      created_at:
+        database_column: CREATED_AT
+        state: true
+        insert: true
+        update: false
+        immutable: true
+      updated_at:
+        database_column: UPDATED_AT
+        state: true
+        insert: true
+        update: true
+      user_input:
+        database_column: USER_INPUT
+        state: true
+        insert: true
+        update: false
+      user_updated:
+        database_column: USER_UPDATED
+        state: true
+        insert: true
+        update: true

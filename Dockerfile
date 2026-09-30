@@ -30,6 +30,12 @@ WORKDIR /app
 COPY --from=builder /out/auditchain-agent /app/auditchain-agent
 COPY config.yml /app/config.yml
 
+# Durable idempotency state is outside the application image and writable by
+# the non-root runtime user. The recovery policy is mounted read-only by
+# Compose/deployment configuration.
+RUN mkdir -p /var/lib/auditchain-agent && chown -R agent:agent /var/lib/auditchain-agent
+VOLUME ["/var/lib/auditchain-agent"]
+
 # Jalankan sebagai non-root
 USER agent
 
