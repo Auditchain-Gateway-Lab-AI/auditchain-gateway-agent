@@ -20,6 +20,8 @@ Run:
 go run ./cmd/connectivity-check
 ```
 
+When `FABRIC_PEER_ENDPOINT` uses an IP address (for example, a Tailscale IP) but the peer TLS certificate contains only DNS SANs, set `FABRIC_PEER_TLS_SERVER_NAME` to one of those exact DNS names (for example, `peer0.org1.audit.example.com`). The connection still goes to the configured endpoint; this setting supplies the TLS verification/SNI name. Certificate verification remains enabled—do not use an insecure TLS option or replace the peer certificate with an unverified one.
+
 The command exits non-zero on a connection failure, missing anchor, malformed Fabric response, or mismatch. It prints only pass/fail summaries and does not print the DSN or credentials.
 
 If the client has no anchored audit log yet, set `CONNECTIVITY_ANCHOR_ID` to a known valid anchor belonging to that client. The read query still confirms the anchor and expected Merkle root from PostgreSQL before evaluating Fabric.

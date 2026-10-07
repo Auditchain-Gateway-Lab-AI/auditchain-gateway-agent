@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"go-blockchain-api/internal/models"
@@ -39,7 +40,8 @@ func InitFabricGateway(db *gorm.DB) (*FabricService, error) {
 		return nil, fmt.Errorf("gagal membaca TLS cert: %v", err)
 	}
 	certPool.AppendCertsFromPEM(tlsCert)
-	transportCredentials := credentials.NewClientTLSFromCert(certPool, "")
+	tlsServerName := strings.TrimSpace(os.Getenv("FABRIC_PEER_TLS_SERVER_NAME"))
+	transportCredentials := credentials.NewClientTLSFromCert(certPool, tlsServerName)
 
 	conn, err := grpc.NewClient(peerEndpoint, grpc.WithTransportCredentials(transportCredentials))
 	if err != nil {
