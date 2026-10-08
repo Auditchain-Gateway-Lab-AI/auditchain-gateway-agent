@@ -5,6 +5,7 @@ services:
       dockerfile: Dockerfile
     image: auditchain-gateway-runtime:local
     container_name: auditchain-gateway-runtime
+    user: "${GATEWAY_UID:-1000}:${GATEWAY_GID:-1000}"
     restart: unless-stopped
     env_file:
       - .env
