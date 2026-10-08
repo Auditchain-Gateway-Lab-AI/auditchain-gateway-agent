@@ -18,8 +18,10 @@ import (
 var identifierPattern = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*$`)
 
 var (
-	errVerifyDatabase  = errors.New("verify database unavailable")
-	errVerifyForbidden = errors.New("verify table not allowed")
+	errVerifyDatabase            = errors.New("verify database unavailable")
+	errVerifyForbidden           = errors.New("verify table not allowed")
+	errAuditTrailProjectionMiss  = errors.New("audit trail table not found")
+	errAuditTrailCandidateLookup = errors.New("audit trail candidate lookup failed")
 )
 
 type ReadProjection struct {
@@ -707,9 +709,10 @@ func (s *Server) queryAuditTrailCandidates(ctx context.Context, input AuditTrail
 			WHERE rownum = 1
 		`, projection.Table).Scan(&owner, &actualTable)
 		if errors.Is(err, sql.ErrNoRows) {
-			return AuditTrailLookupResult{}, errVerifyDatabase
+			return AuditTrailLookupResult{}, errAuditTrailProjectionMiss
 		}
 		if err != nil {
+			log.Printf("[VerifyServer] Gagal mencari tabel audit_trail untuk lookup: %v", err)
 			return AuditTrailLookupResult{}, errVerifyDatabase
 		}
 	}
@@ -739,7 +742,8 @@ func (s *Server) queryAuditTrailCandidates(ctx context.Context, input AuditTrail
 	`, owner, actualTable)
 	rows, err := s.db.QueryContext(ctx, query, input.Table, input.Operation, from, to, limit+1)
 	if err != nil {
-		return AuditTrailLookupResult{}, errVerifyDatabase
+		log.Printf("[VerifyServer] Query audit_trail lookup gagal table=%q operation=%q: %v", input.Table, input.Operation, err)
+		return AuditTrailLookupResult{}, errAuditTrailCandidateLookup
 	}
 	defer rows.Close()
 
@@ -750,7 +754,8 @@ func (s *Server) queryAuditTrailCandidates(ctx context.Context, input AuditTrail
 		var appUser, oldJSON, newJSON sql.NullString
 		var eventTime sql.NullTime
 		if err := rows.Scan(&id, &tableName, &operation, &dbUser, &appUser, &oldJSON, &newJSON, &eventTime); err != nil {
-			return AuditTrailLookupResult{}, errVerifyDatabase
+			log.Printf("[VerifyServer] Scan audit_trail lookup gagal: %v", err)
+			return AuditTrailLookupResult{}, errAuditTrailCandidateLookup
 		}
 		if readCount == limit {
 			result.Truncated = true
@@ -759,11 +764,13 @@ func (s *Server) queryAuditTrailCandidates(ctx context.Context, input AuditTrail
 		readCount++
 		dataLama, err := decodeAuditImage(oldJSON)
 		if err != nil {
-			return AuditTrailLookupResult{}, errVerifyDatabase
+			log.Printf("[VerifyServer] Lewati audit_trail candidate id=%q: DATA_LAMA bukan JSON valid", id.String)
+			continue
 		}
 		dataBaru, err := decodeAuditImage(newJSON)
 		if err != nil {
-			return AuditTrailLookupResult{}, errVerifyDatabase
+			log.Printf("[VerifyServer] Lewati audit_trail candidate id=%q: DATA_BARU bukan JSON valid", id.String)
+			continue
 		}
 		record := AuditTrailRecord{
 			Found: true, ID: id.String, Tabel: tableName.String, Operasi: operation.String,
@@ -781,7 +788,8 @@ func (s *Server) queryAuditTrailCandidates(ctx context.Context, input AuditTrail
 		}
 	}
 	if err := rows.Err(); err != nil {
-		return AuditTrailLookupResult{}, errVerifyDatabase
+		log.Printf("[VerifyServer] Iterasi audit_trail lookup gagal: %v", err)
+		return AuditTrailLookupResult{}, errAuditTrailCandidateLookup
 	}
 	return result, nil
 }
@@ -868,6 +876,16 @@ func (s *Server) writeQueryError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, errVerifyForbidden):
 		http.Error(w, "table not allowed", http.StatusForbidden)
+	case errors.Is(err, errAuditTrailProjectionMiss):
+		s.writeJSON(w, http.StatusNotFound, map[string]string{
+			"code":    "audit_trail_table_not_found",
+			"message": "configured source audit history table was not found",
+		})
+	case errors.Is(err, errAuditTrailCandidateLookup):
+		s.writeJSON(w, http.StatusInternalServerError, map[string]string{
+			"code":    "audit_trail_lookup_failed",
+			"message": "source audit history lookup failed",
+		})
 	case errors.Is(err, errVerifyDatabase):
 		w.Header().Set("Content-Type", "application/json")
 		s.writeJSON(w, http.StatusServiceUnavailable, map[string]string{
