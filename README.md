@@ -29,6 +29,11 @@ membaca event asli dari tabel historis client (default `AUDIT_TRAIL`). Endpoint
 ini terpisah dari `GET /verify/:table/:id`, yang membaca row operasional saat
 ini. Gateway dapat memakai event historis tersebut untuk memperbaiki metadata
 audit log tanpa MinIO setelah hash, Merkle proof, dan Fabric anchor cocok.
+Untuk log lama yang belum menyimpan ID sumber, Gateway meminta kandidat terbatas
+melalui `GET /verify-audit-lookup?table=...&operation=...&primary_key=...&record_id=...&at=...`;
+pencarian dibatasi ke tabel, operasi, primary key, dan jendela waktu lima menit. Kandidat tidak dapat
+dipakai untuk recovery sebelum Gateway mencocokkan data dengan hash dan proof
+yang sudah di-anchor.
 
 ## Konfigurasi
 

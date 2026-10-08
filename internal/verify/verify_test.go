@@ -182,6 +182,26 @@ func TestHandleVerifyAuditValidatesRecordIDAndReportsDatabaseUnavailable(t *test
 	}
 }
 
+func TestHandleLookupAuditTrailValidatesBoundedQuery(t *testing.T) {
+	server := NewServer(nil, "secret-token", "9090")
+
+	badWindow := httptest.NewRequest(http.MethodGet, "/verify-audit-lookup?table=RUANGAN&operation=DELETE&primary_key=ID&record_id=613&at=2026-10-08T03%3A00%3A00Z&window_seconds=301", nil)
+	badWindow.Header.Set("Authorization", "Bearer secret-token")
+	badResponse := httptest.NewRecorder()
+	server.Handler().ServeHTTP(badResponse, badWindow)
+	if badResponse.Code != http.StatusBadRequest {
+		t.Fatalf("expected bad request for oversized lookup window, got %d", badResponse.Code)
+	}
+
+	valid := httptest.NewRequest(http.MethodGet, "/verify-audit-lookup?table=RUANGAN&operation=DELETE&primary_key=ID&record_id=613&at=2026-10-08T03%3A00%3A00Z", nil)
+	valid.Header.Set("Authorization", "Bearer secret-token")
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, valid)
+	if response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected database unavailable after valid query, got %d body=%s", response.Code, response.Body.String())
+	}
+}
+
 func TestDecodeAuditImage(t *testing.T) {
 	image, err := decodeAuditImage(sql.NullString{String: `{"ID":620,"nama":"ruangan"}`, Valid: true})
 	if err != nil {
@@ -189,6 +209,16 @@ func TestDecodeAuditImage(t *testing.T) {
 	}
 	if image["ID"].(json.Number).String() != "620" || image["nama"] != "ruangan" {
 		t.Fatalf("decoded image = %#v", image)
+	}
+}
+
+func TestAuditTrailRecordMatchesConfiguredPrimaryKey(t *testing.T) {
+	record := AuditTrailRecord{DataLama: map[string]interface{}{"ROOM_ID": json.Number("613")}}
+	if !auditTrailRecordMatchesKey(record, "room_id", "613") {
+		t.Fatal("expected key match to ignore identifier casing")
+	}
+	if auditTrailRecordMatchesKey(record, "room_id", "614") {
+		t.Fatal("unexpected source record key match")
 	}
 }
 
