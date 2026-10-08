@@ -29,6 +29,29 @@ type ReadProjection struct {
 	StateColumns []string
 }
 
+// AuditTrailProjection describes the single source-side history table exposed
+// by /verify-audit. Request parameters can select only a record ID; they can
+// never select a schema, table, or column.
+type AuditTrailProjection struct {
+	Schema string
+	Table  string
+}
+
+// AuditTrailRecord is the immutable source event used to reconstruct a
+// tampered Gateway audit-log payload. Field names match the SIMRS audit_trail
+// contract consumed by the Gateway.
+type AuditTrailRecord struct {
+	Found    bool                   `json:"found"`
+	ID       string                 `json:"id"`
+	Tabel    string                 `json:"tabel"`
+	Operasi  string                 `json:"operasi"`
+	DBUser   string                 `json:"db_user"`
+	AppUser  *string                `json:"app_user"`
+	DataLama map[string]interface{} `json:"data_lama"`
+	DataBaru map[string]interface{} `json:"data_baru"`
+	Waktu    time.Time              `json:"waktu"`
+}
+
 // ResourceRecord adalah data yang dikembalikan ke Gateway saat verifikasi.
 // Berisi semua kolom non-geometry dari baris yang diminta.
 type ResourceRecord struct {
@@ -46,12 +69,16 @@ type Server struct {
 	recoveryHandler      http.Handler
 	metricsHandler       http.Handler
 	readProjection       func(string) (ReadProjection, bool)
+	auditTrailProjection AuditTrailProjection
 	tableEndpointEnabled bool
 	maxResponseBytes     int64
 }
 
 func NewServer(db *sql.DB, verifyToken, port string) *Server {
-	return &Server{db: db, verifyToken: verifyToken, port: port, maxResponseBytes: 1024 * 1024}
+	return &Server{
+		db: db, verifyToken: verifyToken, port: port, maxResponseBytes: 1024 * 1024,
+		auditTrailProjection: AuditTrailProjection{Table: "AUDIT_TRAIL"},
+	}
 }
 
 func (s *Server) SetRecoveryHandler(handler http.Handler) {
@@ -66,6 +93,15 @@ func (s *Server) SetReadProjection(lookup func(string) (ReadProjection, bool)) {
 	s.readProjection = lookup
 }
 
+func (s *Server) SetAuditTrailProjection(projection AuditTrailProjection) {
+	projection.Schema = strings.ToUpper(strings.TrimSpace(projection.Schema))
+	projection.Table = strings.ToUpper(strings.TrimSpace(projection.Table))
+	if strings.TrimSpace(projection.Table) == "" {
+		projection.Table = "AUDIT_TRAIL"
+	}
+	s.auditTrailProjection = projection
+}
+
 func (s *Server) EnableTableEndpoint(enabled bool) {
 	s.tableEndpointEnabled = enabled
 }
@@ -73,8 +109,11 @@ func (s *Server) EnableTableEndpoint(enabled bool) {
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 
-	// Endpoint lama — audit_trail (untuk SIMRS)
+	// Read one current operational resource row.
 	mux.HandleFunc("/verify/", s.handleVerify)
+	// Read one historical source event by its audit_trail ID. This is separate
+	// from /verify/:table/:id, which reads the current operational row.
+	mux.HandleFunc("/verify-audit/", s.handleVerifyAudit)
 
 	// Endpoint baru — resource geospasial (untuk Satu Peta)
 	// Format: GET /verify-resource/<table>/<id>
@@ -448,6 +487,122 @@ func (s *Server) handleVerify(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.writeJSON(w, http.StatusOK, rec)
+}
+
+// handleVerifyAudit serves GET /verify-audit/<audit_trail_id>.
+func (s *Server) handleVerifyAudit(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !s.authorized(r) {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	recordID := strings.TrimPrefix(r.URL.Path, "/verify-audit/")
+	if recordID == "" || strings.Contains(recordID, "/") || len(recordID) > 256 {
+		http.Error(w, "format path harus /verify-audit/<audit_trail_id>", http.StatusBadRequest)
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+	defer cancel()
+	record, err := s.queryAuditTrail(ctx, recordID)
+	if err != nil {
+		s.writeQueryError(w, err)
+		return
+	}
+	s.writeJSON(w, http.StatusOK, record)
+}
+
+func (s *Server) queryAuditTrail(ctx context.Context, recordID string) (AuditTrailRecord, error) {
+	if s.db == nil {
+		return AuditTrailRecord{}, errVerifyDatabase
+	}
+	projection := s.auditTrailProjection
+	if !IsValidSQLIdentifier(projection.Table) {
+		return AuditTrailRecord{}, errVerifyForbidden
+	}
+	owner := strings.TrimSpace(projection.Schema)
+	if owner != "" && !IsValidSQLIdentifier(owner) {
+		return AuditTrailRecord{}, errVerifyForbidden
+	}
+	actualTable := projection.Table
+	if owner == "" {
+		err := s.db.QueryRowContext(ctx, `
+			SELECT owner, table_name
+			FROM (
+				SELECT owner, table_name
+				FROM all_tables
+				WHERE UPPER(table_name) = UPPER(:1)
+				ORDER BY CASE WHEN owner = USER THEN 0 ELSE 1 END, owner
+			)
+			WHERE rownum = 1
+		`, projection.Table).Scan(&owner, &actualTable)
+		if errors.Is(err, sql.ErrNoRows) {
+			return AuditTrailRecord{}, errVerifyDatabase
+		}
+		if err != nil {
+			return AuditTrailRecord{}, errVerifyDatabase
+		}
+	}
+	if !IsValidSQLIdentifier(owner) || !IsValidSQLIdentifier(actualTable) {
+		return AuditTrailRecord{}, errVerifyForbidden
+	}
+
+	// The projection is fixed to the known SIMRS audit_trail columns. Table and
+	// owner are validated identifiers from local Agent configuration.
+	query := fmt.Sprintf(`
+		SELECT "ID", "TABEL", "OPERASI", "DB_USER", "APP_USER", "DATA_LAMA", "DATA_BARU", "WAKTU"
+		FROM "%s"."%s"
+		WHERE "ID" = :1 AND ROWNUM <= 1
+	`, owner, actualTable)
+	var id, tableName, operation, dbUser sql.NullString
+	var appUser, oldJSON, newJSON sql.NullString
+	var eventTime sql.NullTime
+	err := s.db.QueryRowContext(ctx, query, recordID).Scan(
+		&id, &tableName, &operation, &dbUser, &appUser, &oldJSON, &newJSON, &eventTime,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return AuditTrailRecord{Found: false, ID: recordID}, nil
+	}
+	if err != nil {
+		log.Printf("[VerifyServer] Gagal membaca audit_trail id=%q: %v", recordID, err)
+		return AuditTrailRecord{}, errVerifyDatabase
+	}
+	dataLama, err := decodeAuditImage(oldJSON)
+	if err != nil {
+		return AuditTrailRecord{}, errVerifyDatabase
+	}
+	dataBaru, err := decodeAuditImage(newJSON)
+	if err != nil {
+		return AuditTrailRecord{}, errVerifyDatabase
+	}
+	result := AuditTrailRecord{
+		Found: true, ID: id.String, Tabel: tableName.String, Operasi: operation.String,
+		DBUser: dbUser.String, DataLama: dataLama, DataBaru: dataBaru,
+	}
+	if appUser.Valid {
+		value := appUser.String
+		result.AppUser = &value
+	}
+	if eventTime.Valid {
+		result.Waktu = eventTime.Time
+	}
+	return result, nil
+}
+
+func decodeAuditImage(raw sql.NullString) (map[string]interface{}, error) {
+	if !raw.Valid || strings.TrimSpace(raw.String) == "" || strings.EqualFold(strings.TrimSpace(raw.String), "null") {
+		return nil, nil
+	}
+	var value map[string]interface{}
+	decoder := json.NewDecoder(strings.NewReader(raw.String))
+	decoder.UseNumber()
+	if err := decoder.Decode(&value); err != nil {
+		return nil, err
+	}
+	return value, nil
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {

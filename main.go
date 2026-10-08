@@ -69,6 +69,10 @@ func main() {
 	verifyToken := cfg.VerifyToken()
 	verifyPort := getEnv("AGENT_VERIFY_PORT", "9090")
 	verifyServer := verify.NewServer(db, verifyToken, verifyPort)
+	verifyServer.SetAuditTrailProjection(verify.AuditTrailProjection{
+		Schema: strings.TrimSpace(os.Getenv("AGENT_AUDIT_TRAIL_SCHEMA")),
+		Table:  getEnv("AGENT_AUDIT_TRAIL_TABLE", "AUDIT_TRAIL"),
+	})
 	if enabled, err := getEnvBool("AGENT_ENABLE_TABLE_ENDPOINT", false); err != nil {
 		log.Fatalf("❌ AGENT_ENABLE_TABLE_ENDPOINT tidak valid: %v", err)
 	} else {
