@@ -8,7 +8,7 @@ import (
 )
 
 // AgentConfig menyimpan URL dan token Agent milik masing-masing klien.
-// Gateway menggunakan ini untuk memanggil GET /verify/:table/:source_record_id
+// Gateway uses VerifyToken for read-only Agent verification and audit-history requests.
 // ke Agent saat verifikasi Lapis 3.
 type AgentConfig struct {
 	ID       string `gorm:"primaryKey;type:varchar(36)" json:"id"`

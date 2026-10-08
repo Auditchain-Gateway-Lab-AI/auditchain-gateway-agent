@@ -1025,9 +1025,9 @@ const docTemplate = `{
                         }
                     },
                     "500": {
-                        "description": "Kesalahan sistem saat verifikasi",
+                        "description": "Kesalahan sistem atau penyimpanan incident saat verifikasi",
                         "schema": {
-                            "$ref": "#/definitions/audit.ErrorResponse"
+                            "$ref": "#/definitions/audit.IncidentPersistenceErrorResponse"
                         }
                     }
                 }
@@ -1517,6 +1517,40 @@ const docTemplate = `{
                 }
             }
         },
+        "audit.IncidentPersistenceErrorResponse": {
+            "type": "object",
+            "properties": {
+                "code": {
+                    "type": "string",
+                    "example": "INCIDENT_PERSISTENCE_FAILED"
+                },
+                "data": {
+                    "type": "object",
+                    "additionalProperties": true
+                },
+                "error": {
+                    "type": "string"
+                },
+                "incident_scope": {
+                    "type": "string"
+                },
+                "incident_type": {
+                    "type": "string"
+                },
+                "layer": {
+                    "type": "string"
+                },
+                "log_id": {
+                    "type": "string"
+                },
+                "status": {
+                    "type": "string"
+                },
+                "verification_status": {
+                    "type": "string"
+                }
+            }
+        },
         "audit.LatestVerificationRunResponse": {
             "type": "object",
             "properties": {
@@ -1724,6 +1758,18 @@ const docTemplate = `{
                 "expected_hash": {
                     "type": "string"
                 },
+                "incident_id": {
+                    "type": "string"
+                },
+                "incident_scope": {
+                    "type": "string"
+                },
+                "incident_status": {
+                    "type": "string"
+                },
+                "incident_type": {
+                    "type": "string"
+                },
                 "is_valid": {
                     "type": "boolean"
                 },
@@ -1735,12 +1781,19 @@ const docTemplate = `{
                 },
                 "message": {
                     "type": "string"
+                },
+                "source_status": {
+                    "type": "string"
                 }
             }
         },
         "audit.VerifyLogResponse": {
             "type": "object",
             "properties": {
+                "code": {
+                    "type": "string",
+                    "example": "INTEGRITY_TAMPERED"
+                },
                 "data": {
                     "$ref": "#/definitions/audit.VerifyLogData"
                 },
@@ -2358,7 +2411,7 @@ const docTemplate = `{
                     "type": "string"
                 },
                 "integrity_status": {
-                    "description": "Integrity verification is an operational cache and is never part of the\ncanonical hash formula.",
+                    "description": "Integrity verification is an operational cache and is never part of the\ncanonical hash formula. Empty provenance means the result predates tracking.",
                     "type": "string"
                 },
                 "is_latest": {

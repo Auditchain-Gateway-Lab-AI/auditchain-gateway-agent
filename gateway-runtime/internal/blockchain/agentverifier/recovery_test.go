@@ -50,6 +50,107 @@ func TestExecuteRecoveryRequestUsesWriteTokenAndContract(t *testing.T) {
 	}
 }
 
+func TestFetchAuditTrailUsesDedicatedReadEndpoint(t *testing.T) {
+	var seenAuth, seenPath string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seenAuth = r.Header.Get("Authorization")
+		seenPath = r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"found":true,"id":"620","tabel":"RUANGAN","operasi":"DELETE","db_user":"POLINEMA","data_lama":{"id":620,"nama":"ruangan"},"data_baru":null,"waktu":"2026-10-08T02:00:00Z"}`))
+	}))
+	defer server.Close()
+
+	record, err := fetchAuditTrailFromAgent(context.Background(), &models.AgentConfig{
+		AgentURL: server.URL, VerifyToken: "read-token", TimeoutSeconds: 2,
+	}, "620")
+	if err != nil {
+		t.Fatalf("fetchAuditTrailFromAgent() error = %v", err)
+	}
+	if seenAuth != "Bearer read-token" || seenPath != "/verify-audit/620" {
+		t.Fatalf("request auth/path = %q/%q", seenAuth, seenPath)
+	}
+	metadata, err := record.MetadataJSON()
+	if err != nil {
+		t.Fatalf("MetadataJSON() error = %v", err)
+	}
+	if string(metadata) != `{"data_lama":{"id":620,"nama":"ruangan"}}` {
+		t.Fatalf("metadata = %s", metadata)
+	}
+}
+
+func TestFetchAuditTrailCandidatesUsesBoundedLookupContract(t *testing.T) {
+	var seenAuth string
+	var seenPath string
+	var seenQuery = make(map[string]string)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seenAuth = r.Header.Get("Authorization")
+		seenPath = r.URL.Path
+		for key, values := range r.URL.Query() {
+			if len(values) > 0 {
+				seenQuery[key] = values[0]
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"records":[{"found":true,"id":"audit-613","tabel":"RUANGAN","operasi":"DELETE","data_lama":{"ID":613},"waktu":"2026-10-08T03:00:00Z"}],"truncated":false}`))
+	}))
+	defer server.Close()
+
+	at := time.Date(2026, 10, 8, 3, 0, 0, 0, time.FixedZone("UTC+7", 7*60*60))
+	result, err := fetchAuditTrailCandidatesFromAgent(context.Background(), &models.AgentConfig{
+		AgentURL: server.URL, VerifyToken: "read-token", TimeoutSeconds: 2,
+	}, "RUANGAN", "DELETE", "ID", "613", at)
+	if err != nil {
+		t.Fatalf("fetchAuditTrailCandidatesFromAgent() error = %v", err)
+	}
+	if seenAuth != "Bearer read-token" || seenPath != "/verify-audit-lookup" {
+		t.Fatalf("request auth/path = %q/%q", seenAuth, seenPath)
+	}
+	if seenQuery["table"] != "RUANGAN" || seenQuery["operation"] != "DELETE" || seenQuery["primary_key"] != "ID" || seenQuery["record_id"] != "613" || seenQuery["window_seconds"] != "300" || seenQuery["limit"] != "50" {
+		t.Fatalf("unexpected lookup query: %#v", seenQuery)
+	}
+	if result == nil || len(result.Records) != 1 || result.Records[0].ID != "audit-613" || result.Truncated {
+		t.Fatalf("unexpected result: %#v", result)
+	}
+}
+
+func TestFetchAuditTrailCandidatesMapsAgentLookupErrors(t *testing.T) {
+	tests := []struct {
+		name       string
+		status     int
+		body       string
+		wantReason string
+	}{
+		{
+			name: "database unavailable", status: http.StatusServiceUnavailable,
+			body: `{"code":"database_unreachable"}`, wantReason: "agent_audit_trail_lookup_database_unavailable",
+		},
+		{
+			name: "lookup query failed", status: http.StatusInternalServerError,
+			body: `{"code":"audit_trail_lookup_failed"}`, wantReason: "agent_audit_trail_lookup_failed",
+		},
+		{
+			name: "history table missing", status: http.StatusNotFound,
+			body: `{"code":"audit_trail_table_not_found"}`, wantReason: "agent_audit_trail_table_not_found",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(test.status)
+				_, _ = w.Write([]byte(test.body))
+			}))
+			defer server.Close()
+
+			_, err := fetchAuditTrailCandidatesFromAgent(context.Background(), &models.AgentConfig{
+				AgentURL: server.URL, TimeoutSeconds: 2,
+			}, "RUANGAN", "DELETE", "ID", "613", time.Now())
+			if err == nil || !strings.HasPrefix(err.Error(), test.wantReason) {
+				t.Fatalf("error = %v, want prefix %q", err, test.wantReason)
+			}
+		})
+	}
+}
+
 func TestExecuteRecoveryRequestClassifiesAgentError(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

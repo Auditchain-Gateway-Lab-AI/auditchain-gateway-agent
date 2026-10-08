@@ -36,6 +36,29 @@ definitions:
         example: Pesan kesalahan atau validasi
         type: string
     type: object
+  audit.IncidentPersistenceErrorResponse:
+    properties:
+      code:
+        example: INCIDENT_PERSISTENCE_FAILED
+        type: string
+      data:
+        additionalProperties: true
+        type: object
+      error:
+        type: string
+      incident_scope:
+        type: string
+      incident_type:
+        type: string
+      layer:
+        type: string
+      log_id:
+        type: string
+      status:
+        type: string
+      verification_status:
+        type: string
+    type: object
   audit.LatestVerificationRunResponse:
     properties:
       data:
@@ -172,6 +195,14 @@ definitions:
         type: string
       expected_hash:
         type: string
+      incident_id:
+        type: string
+      incident_scope:
+        type: string
+      incident_status:
+        type: string
+      incident_type:
+        type: string
       is_valid:
         type: boolean
       log_id:
@@ -180,9 +211,14 @@ definitions:
         type: string
       message:
         type: string
+      source_status:
+        type: string
     type: object
   audit.VerifyLogResponse:
     properties:
+      code:
+        example: INTEGRITY_TAMPERED
+        type: string
       data:
         $ref: '#/definitions/audit.VerifyLogData'
       layer:
@@ -613,7 +649,7 @@ definitions:
       integrity_status:
         description: |-
           Integrity verification is an operational cache and is never part of the
-          canonical hash formula.
+          canonical hash formula. Empty provenance means the result predates tracking.
         type: string
       is_latest:
         type: boolean
@@ -1593,9 +1629,9 @@ paths:
           schema:
             $ref: '#/definitions/audit.VerifyLogResponse'
         "500":
-          description: Kesalahan sistem saat verifikasi
+          description: Kesalahan sistem atau penyimpanan incident saat verifikasi
           schema:
-            $ref: '#/definitions/audit.ErrorResponse'
+            $ref: '#/definitions/audit.IncidentPersistenceErrorResponse'
       security:
       - BearerAuth: []
       summary: Verify a specific log

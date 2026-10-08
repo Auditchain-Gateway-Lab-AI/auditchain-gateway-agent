@@ -12,6 +12,7 @@ import (
 	"io"
 	"math"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -25,7 +26,7 @@ import (
 // Field-field ini mencerminkan kolom tabel audit_trail di DB klien.
 type AuditTrailRecord struct {
 	Found    bool                   `json:"found"`
-	ID       int                    `json:"id"`
+	ID       string                 `json:"id"`
 	Tabel    string                 `json:"tabel"`
 	Operasi  string                 `json:"operasi"`
 	DBUser   string                 `json:"db_user"`
@@ -33,6 +34,11 @@ type AuditTrailRecord struct {
 	DataLama map[string]interface{} `json:"data_lama"`
 	DataBaru map[string]interface{} `json:"data_baru"`
 	Waktu    time.Time              `json:"waktu"`
+}
+
+type AuditTrailLookupResult struct {
+	Records   []AuditTrailRecord `json:"records"`
+	Truncated bool               `json:"truncated"`
 }
 
 // Discrepancy mencatat satu perbedaan antara audit log di middleware vs data dari Agent
@@ -82,7 +88,7 @@ func NewService(db *gorm.DB) *Service {
 //     Jika kosong → log bukan dari Agent, lapis ini dilewati.
 //  2. Ambil AgentConfig klien dari DB.
 //     Jika belum dikonfigurasi → lapis ini dilewati.
-//  3. Panggil GET <agent_url>/verify/<table>/<source_record_id>.
+//  3. Panggil GET <agent_url>/verify-audit/<source_record_id>.
 //  4. Bandingkan field kunci: tabel↔resource, operasi↔action, app_user/db_user↔actor,
 //     serta metadata (data_lama+data_baru) ↔ metadata di log.
 func (s *Service) VerifyAgainstAgent(auditLog *models.AuditLog) (*VerifyResult, error) {
@@ -122,23 +128,14 @@ func (s *Service) VerifyAgainstAgent(auditLog *models.AuditLog) (*VerifyResult, 
 	return &VerifyResult{IsMatch: true, SourceFound: false, AgentUsed: false}, nil
 }
 
-// verifyViaAuditTrail — mode SIMRS, query ke /verify/<table>/<source_record_id>
+// verifyViaAuditTrail reads the immutable source event via /verify-audit/<id>.
 func (s *Service) verifyViaAuditTrail(cfg *models.AgentConfig, auditLog *models.AuditLog) (*VerifyResult, error) {
-	tableName := auditLog.Resource
-	recordID := auditLog.SourceRecordID
-	if strings.Contains(tableName, ":") {
-		parts := strings.SplitN(tableName, ":", 2)
-		tableName = parts[0]
-		if len(parts) == 2 && parts[1] != "" {
-			// Endpoint Agent membutuhkan ID row pada tabel, bukan audit_trail_id.
-			recordID = parts[1]
-		}
-	}
-	if tableName == "" || recordID == "" {
-		return nil, fmt.Errorf("resource tabel untuk verifikasi Agent kosong")
+	recordID := strings.TrimSpace(auditLog.SourceRecordID)
+	if recordID == "" {
+		return nil, fmt.Errorf("source_record_id untuk verifikasi Agent kosong")
 	}
 
-	agentRec, err := s.fetchFromAgent(cfg, tableName, recordID)
+	agentRec, err := s.fetchFromAgent(cfg, recordID)
 	if err != nil {
 		return nil, fmt.Errorf("gagal menghubungi Agent: %w", err)
 	}
@@ -355,15 +352,19 @@ func (s *Service) loadAgentConfig(clientID string) (*models.AgentConfig, error) 
 	return &cfg, err
 }
 
-// fetchFromAgent memanggil GET <agent_url>/verify/<table>/<source_record_id>
-func (s *Service) fetchFromAgent(cfg *models.AgentConfig, tableName, sourceRecordID string) (*AuditTrailRecord, error) {
+// fetchFromAgent reads one source audit event from the client Agent.
+func (s *Service) fetchFromAgent(cfg *models.AgentConfig, sourceRecordID string) (*AuditTrailRecord, error) {
+	return fetchAuditTrailFromAgent(context.Background(), cfg, sourceRecordID)
+}
+
+func fetchAuditTrailFromAgent(ctx context.Context, cfg *models.AgentConfig, sourceRecordID string) (*AuditTrailRecord, error) {
 	timeout := time.Duration(cfg.TimeoutSeconds) * time.Second
 	if timeout <= 0 {
 		timeout = 15 * time.Second
 	}
 
-	url := agentVerifyURL(cfg.AgentURL, tableName, sourceRecordID)
-	req, err := http.NewRequest(http.MethodGet, url, nil)
+	endpoint := agentAuditTrailURL(cfg.AgentURL, sourceRecordID)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -382,8 +383,11 @@ func (s *Service) fetchFromAgent(cfg *models.AgentConfig, tableName, sourceRecor
 	if resp.StatusCode == http.StatusUnauthorized {
 		return nil, fmt.Errorf("token verifikasi Agent tidak valid (401) — periksa AGENT_VERIFY_TOKEN")
 	}
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, fmt.Errorf("audit_trail_record_not_found")
+	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("Agent mengembalikan status %d", resp.StatusCode)
+		return nil, fmt.Errorf("agent_audit_trail_unavailable: Agent mengembalikan status %d", resp.StatusCode)
 	}
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
@@ -392,11 +396,139 @@ func (s *Service) fetchFromAgent(cfg *models.AgentConfig, tableName, sourceRecor
 	}
 
 	var rec AuditTrailRecord
-	if err := json.Unmarshal(body, &rec); err != nil {
+	decoder := json.NewDecoder(strings.NewReader(string(body)))
+	decoder.UseNumber()
+	if err := decoder.Decode(&rec); err != nil {
 		return nil, fmt.Errorf("gagal parse response Agent: %w", err)
 	}
 
 	return &rec, nil
+}
+
+// ReadAuditTrail fetches one immutable source event from the tenant's Agent.
+// It is used for both Layer 3 verification and no-MinIO Gateway log recovery.
+func (s *Service) ReadAuditTrail(ctx context.Context, clientID, sourceRecordID string) (*AuditTrailRecord, error) {
+	if strings.TrimSpace(sourceRecordID) == "" {
+		return nil, fmt.Errorf("audit_trail_reference_missing")
+	}
+	cfg, err := s.loadAgentConfig(clientID)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, fmt.Errorf("agent_not_configured")
+		}
+		return nil, fmt.Errorf("agent_config_unavailable: %w", err)
+	}
+	if !cfg.IsActive || strings.TrimSpace(cfg.AgentURL) == "" || strings.Contains(cfg.AgentURL, ":8083") {
+		return nil, fmt.Errorf("agent_not_configured")
+	}
+	return fetchAuditTrailFromAgent(ctx, cfg, sourceRecordID)
+}
+
+// FindAuditTrailCandidates asks the Agent for a bounded set of nearby audit
+// events. A candidate is not trusted until recovery matches it to the stored
+// AuditChain leaf, Merkle proof, and Fabric root.
+func (s *Service) FindAuditTrailCandidates(ctx context.Context, clientID, tableName, operation, primaryKey, recordID string, at time.Time) (*AuditTrailLookupResult, error) {
+	if strings.TrimSpace(tableName) == "" || strings.TrimSpace(primaryKey) == "" || strings.TrimSpace(recordID) == "" || at.IsZero() {
+		return nil, fmt.Errorf("audit_trail_lookup_invalid_request")
+	}
+	cfg, err := s.loadAgentConfig(clientID)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, fmt.Errorf("agent_not_configured")
+		}
+		return nil, fmt.Errorf("agent_config_unavailable: %w", err)
+	}
+	if !cfg.IsActive || strings.TrimSpace(cfg.AgentURL) == "" || strings.Contains(cfg.AgentURL, ":8083") {
+		return nil, fmt.Errorf("agent_not_configured")
+	}
+	return fetchAuditTrailCandidatesFromAgent(ctx, cfg, tableName, operation, primaryKey, recordID, at)
+}
+
+func fetchAuditTrailCandidatesFromAgent(ctx context.Context, cfg *models.AgentConfig, tableName, operation, primaryKey, recordID string, at time.Time) (*AuditTrailLookupResult, error) {
+	if cfg == nil || strings.TrimSpace(cfg.AgentURL) == "" {
+		return nil, fmt.Errorf("agent_not_configured")
+	}
+	values := url.Values{}
+	values.Set("table", strings.TrimSpace(tableName))
+	values.Set("operation", strings.ToUpper(strings.TrimSpace(operation)))
+	values.Set("primary_key", strings.TrimSpace(primaryKey))
+	values.Set("record_id", strings.TrimSpace(recordID))
+	values.Set("at", at.UTC().Format(time.RFC3339Nano))
+	values.Set("window_seconds", "300")
+	values.Set("limit", "50")
+	baseURL := strings.TrimRight(cfg.AgentURL, "/")
+	if !strings.HasPrefix(baseURL, "http://") && !strings.HasPrefix(baseURL, "https://") {
+		baseURL = "http://" + baseURL
+	}
+	requestURL := baseURL + "/verify-audit-lookup?" + values.Encode()
+	timeout := time.Duration(cfg.TimeoutSeconds) * time.Second
+	if timeout <= 0 {
+		timeout = 15 * time.Second
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, requestURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("audit_trail_lookup_request_invalid: %w", err)
+	}
+	if cfg.VerifyToken != "" {
+		req.Header.Set("Authorization", "Bearer "+cfg.VerifyToken)
+	}
+	req.Header.Set("Accept", "application/json")
+	resp, err := (&http.Client{Timeout: timeout}).Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("agent_audit_trail_lookup_unreachable: %w", err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
+	if err != nil {
+		return nil, fmt.Errorf("agent_audit_trail_lookup_read_failed: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		var agentError struct {
+			Code string `json:"code"`
+		}
+		_ = json.Unmarshal(body, &agentError)
+		switch strings.ToLower(strings.TrimSpace(agentError.Code)) {
+		case "database_unreachable":
+			return nil, fmt.Errorf("agent_audit_trail_lookup_database_unavailable")
+		case "audit_trail_lookup_failed":
+			return nil, fmt.Errorf("agent_audit_trail_lookup_failed")
+		case "audit_trail_table_not_found":
+			return nil, fmt.Errorf("agent_audit_trail_table_not_found")
+		default:
+			return nil, fmt.Errorf("agent_audit_trail_lookup_http_%d", resp.StatusCode)
+		}
+	}
+	var result AuditTrailLookupResult
+	decoder := json.NewDecoder(strings.NewReader(string(body)))
+	decoder.UseNumber()
+	if err := decoder.Decode(&result); err != nil {
+		return nil, fmt.Errorf("agent_audit_trail_lookup_response_invalid: %w", err)
+	}
+	return &result, nil
+}
+
+func agentAuditTrailURL(agentURL, sourceRecordID string) string {
+	baseURL := strings.TrimRight(agentURL, "/")
+	if !strings.HasPrefix(baseURL, "http://") && !strings.HasPrefix(baseURL, "https://") {
+		baseURL = "http://" + baseURL
+	}
+	return baseURL + "/verify-audit/" + url.PathEscape(strings.TrimSpace(sourceRecordID))
+}
+
+// MetadataJSON produces the exact metadata envelope used by the Gateway CDC
+// contract. Nil images are omitted, matching historical Layer 3 comparison.
+func (r *AuditTrailRecord) MetadataJSON() ([]byte, error) {
+	if r == nil || !r.Found {
+		return nil, fmt.Errorf("audit_trail_record_not_found")
+	}
+	metadata := make(map[string]interface{}, 2)
+	if r.DataLama != nil {
+		metadata["data_lama"] = r.DataLama
+	}
+	if r.DataBaru != nil {
+		metadata["data_baru"] = r.DataBaru
+	}
+	return json.Marshal(metadata)
 }
 
 func agentVerifyURL(agentURL, tableName, resourceID string) string {

@@ -80,16 +80,34 @@ type VerifyLogData struct {
 	LogID              string      `json:"log_id"`
 	IsValid            bool        `json:"is_valid"`
 	Message            string      `json:"message"`
+	IncidentID         string      `json:"incident_id,omitempty"`
+	IncidentScope      string      `json:"incident_scope,omitempty"`
+	IncidentType       string      `json:"incident_type,omitempty"`
+	IncidentStatus     string      `json:"incident_status,omitempty"`
 	ExpectedHash       string      `json:"expected_hash,omitempty"`
 	ActualHash         string      `json:"actual_hash,omitempty"`
 	DBRoot             string      `json:"merkle_root,omitempty"`
 	ChainRoot          string      `json:"blockchain_tx_id,omitempty"`
 	AgentStatus        string      `json:"agent_status,omitempty"`
+	SourceStatus       string      `json:"source_status,omitempty"`
 	AgentDiscrepancies interface{} `json:"agent_discrepancies,omitempty"`
+}
+
+type IncidentPersistenceErrorResponse struct {
+	Code               string                 `json:"code" example:"INCIDENT_PERSISTENCE_FAILED"`
+	Error              string                 `json:"error"`
+	LogID              string                 `json:"log_id,omitempty"`
+	IncidentScope      string                 `json:"incident_scope,omitempty"`
+	IncidentType       string                 `json:"incident_type,omitempty"`
+	VerificationStatus string                 `json:"verification_status,omitempty"`
+	Status             string                 `json:"status,omitempty"`
+	Layer              string                 `json:"layer,omitempty"`
+	Data               map[string]interface{} `json:"data,omitempty"`
 }
 
 type VerifyLogResponse struct {
 	Status  string        `json:"status" example:"success"`
+	Code    string        `json:"code,omitempty" example:"INTEGRITY_TAMPERED"`
 	Layer   string        `json:"layer,omitempty" example:"4_blockchain"`
 	Data    VerifyLogData `json:"data,omitempty"`
 	LogID   string        `json:"log_id,omitempty"`
@@ -133,6 +151,39 @@ type LatestVerificationRunResponse struct {
 	Data *VerificationRunResponse `json:"data"`
 }
 
+func incidentPersistenceErrorPayload(err error) gin.H {
+	payload := gin.H{
+		"code":  "INCIDENT_PERSISTENCE_FAILED",
+		"error": "The gateway could not save the detected recovery incident. Retry after the database issue is resolved.",
+	}
+	var persistenceErr *IncidentPersistenceError
+	if errors.As(err, &persistenceErr) {
+		if persistenceErr.LogID != "" {
+			payload["log_id"] = persistenceErr.LogID
+		}
+		if persistenceErr.IncidentType != "" {
+			payload["incident_type"] = persistenceErr.IncidentType
+		}
+		if persistenceErr.IncidentScope != "" {
+			payload["incident_scope"] = persistenceErr.IncidentScope
+		}
+	}
+	return payload
+}
+
+func verificationLayer(status string) string {
+	switch status {
+	case "failed_local":
+		return "2_local_hash"
+	case "failed_source":
+		return "3_agent_source"
+	case "failed_onchain":
+		return "4_blockchain"
+	default:
+		return "integrity"
+	}
+}
+
 // @Summary Verify a specific log
 // @Description Memverifikasi integritas satu log tertentu (Lapis 2, 3, dan 4).
 // @Tags Audit
@@ -144,7 +195,7 @@ type LatestVerificationRunResponse struct {
 // @Failure 401 {object} ErrorResponse "Identitas client tidak valid"
 // @Failure 404 {object} ErrorResponse "Log tidak ditemukan"
 // @Failure 409 {object} VerifyLogResponse "Verifikasi gagal/tampered pada suatu layer"
-// @Failure 500 {object} ErrorResponse "Kesalahan sistem saat verifikasi"
+// @Failure 500 {object} IncidentPersistenceErrorResponse "Kesalahan sistem atau penyimpanan incident saat verifikasi"
 // @Router /dashboard/verify/{log_id} [get]
 func (h *Handler) VerifyLog(c *gin.Context) {
 	clientID, ok := h.getClientID(c)
@@ -157,6 +208,28 @@ func (h *Handler) VerifyLog(c *gin.Context) {
 
 	result, err := h.Service.VerifyLogIntegrity(logID, clientID)
 	if err != nil {
+		if errors.Is(err, errIncidentPersistence) {
+			payload := incidentPersistenceErrorPayload(err)
+			if result != nil {
+				payload["verification_status"] = result.Status
+				if strings.HasPrefix(result.Status, "failed_") {
+					payload["status"] = "failed"
+					payload["layer"] = verificationLayer(result.Status)
+				}
+				payload["data"] = gin.H{
+					"log_id":        result.LogID,
+					"is_valid":      result.IsValid,
+					"message":       result.Message,
+					"source_status": result.SourceStatus,
+					"expected_hash": result.ExpectedHash,
+					"actual_hash":   result.ActualHash,
+					"db_root":       result.DBRoot,
+					"chain_root":    result.ChainRoot,
+				}
+			}
+			c.JSON(http.StatusInternalServerError, payload)
+			return
+		}
 		switch err.Error() {
 		case "log_not_found":
 			c.JSON(http.StatusNotFound, gin.H{"error": "Log tidak ditemukan."})
@@ -176,20 +249,28 @@ func (h *Handler) VerifyLog(c *gin.Context) {
 	switch result.Status {
 	case "failed_local":
 		c.JSON(http.StatusConflict, gin.H{
-			"status": "failed", "layer": "2_local_hash",
+			"status": "failed", "code": "INTEGRITY_TAMPERED", "layer": "2_local_hash",
 			"data": gin.H{
 				"is_valid": result.IsValid, "message": result.Message,
-				"log_id":        result.LogID,
-				"expected_hash": result.ExpectedHash, "actual_hash": result.ActualHash,
+				"log_id":          result.LogID,
+				"incident_id":     result.IncidentID,
+				"incident_scope":  result.IncidentScope,
+				"incident_type":   result.IncidentType,
+				"incident_status": result.IncidentStatus,
+				"expected_hash":   result.ExpectedHash, "actual_hash": result.ActualHash,
 			},
 		})
 	case "failed_source":
 		c.JSON(http.StatusConflict, gin.H{
-			"status": "failed", "layer": "3_agent_source",
+			"status": "failed", "code": "CLIENT_SOURCE_MISMATCH", "layer": "3_agent_source",
 			"data": gin.H{
-				"is_valid": result.IsValid,
-				"log_id":   result.LogID,
-				"message":  result.Message,
+				"is_valid":        result.IsValid,
+				"log_id":          result.LogID,
+				"message":         result.Message,
+				"incident_id":     result.IncidentID,
+				"incident_scope":  result.IncidentScope,
+				"incident_type":   result.IncidentType,
+				"incident_status": result.IncidentStatus,
 			},
 		})
 	case "pending":
@@ -200,11 +281,15 @@ func (h *Handler) VerifyLog(c *gin.Context) {
 		})
 	case "failed_onchain":
 		c.JSON(http.StatusConflict, gin.H{
-			"status": "failed", "layer": "4_blockchain",
+			"status": "failed", "code": "INTEGRITY_TAMPERED", "layer": "4_blockchain",
 			"data": gin.H{
 				"is_valid": result.IsValid, "message": result.Message,
-				"log_id":  result.LogID,
-				"db_root": result.DBRoot, "chain_root": result.ChainRoot,
+				"log_id":          result.LogID,
+				"incident_id":     result.IncidentID,
+				"incident_scope":  result.IncidentScope,
+				"incident_type":   result.IncidentType,
+				"incident_status": result.IncidentStatus,
+				"db_root":         result.DBRoot, "chain_root": result.ChainRoot,
 			},
 		})
 	case "success":
@@ -219,6 +304,11 @@ func (h *Handler) VerifyLog(c *gin.Context) {
 				"message":             result.Message,
 				"agent_status":        result.AgentStatus,
 				"agent_discrepancies": result.AgentDiscrepancies,
+				"source_status":       result.SourceStatus,
+				"incident_id":         result.IncidentID,
+				"incident_scope":      result.IncidentScope,
+				"incident_type":       result.IncidentType,
+				"incident_status":     result.IncidentStatus,
 			},
 		})
 	}
@@ -384,6 +474,10 @@ func (h *Handler) VerifyResourceHistory(c *gin.Context) {
 		// Ambil semua resource (baris terbaru) di dalam tabel ini
 		resources, err := h.Service.GetTableResources(resourceParam, clientID)
 		if err != nil {
+			if errors.Is(err, errIncidentPersistence) {
+				c.JSON(http.StatusInternalServerError, incidentPersistenceErrorPayload(err))
+				return
+			}
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Gagal mengambil data baris tabel."})
 			return
 		}
@@ -427,6 +521,10 @@ func (h *Handler) VerifyResourceHistory(c *gin.Context) {
 
 	result, err := h.Service.VerifyResourceHistory(resourceParam, clientID)
 	if err != nil {
+		if errors.Is(err, errIncidentPersistence) {
+			c.JSON(http.StatusInternalServerError, incidentPersistenceErrorPayload(err))
+			return
+		}
 		c.JSON(http.StatusNotFound, gin.H{"error": "Riwayat resource tidak ditemukan."})
 		return
 	}
@@ -784,4 +882,64 @@ func (h *Handler) GetLatestVerificationRun(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"data": ToVerificationRunResponse(run)})
+}
+
+// --- Agent API Handlers ---
+
+func (h *Handler) GetOffchainDataForAgent(c *gin.Context) {
+	clientID := c.GetHeader("X-Client-ID")
+	if clientID == "" {
+		// Fallback to JWT if testing via dashboard token
+		id, ok := h.getClientID(c)
+		if ok {
+			clientID = id
+		}
+	}
+
+	if clientID == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Client ID tidak ditemukan (gunakan header X-Client-ID)"})
+		return
+	}
+
+	logs, err := h.Service.GetLogsByResource(c.Param("resource"), clientID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Gagal mengambil data offchain"})
+		return
+	}
+	c.JSON(http.StatusOK, logs)
+}
+
+type VerifyMerkleRootRequest struct {
+	MerkleRoot     string `json:"merkle_root" binding:"required"`
+	BlockchainTxID string `json:"blockchain_tx_id" binding:"required"`
+}
+
+func (h *Handler) VerifyMerkleRootForAgent(c *gin.Context) {
+	var req VerifyMerkleRootRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Format request tidak valid"})
+		return
+	}
+
+	fabricData, err := h.Service.GetFabricRecord(req.BlockchainTxID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Gagal mengambil data dari blockchain"})
+		return
+	}
+
+	chainRoot := ""
+	if root, ok := fabricData["merkle_root"].(string); ok {
+		chainRoot = root
+	} else if root, ok := fabricData["merkleRoot"].(string); ok {
+		chainRoot = root
+	}
+
+	isMatch := chainRoot == req.MerkleRoot
+
+	c.JSON(http.StatusOK, gin.H{
+		"is_match":             isMatch,
+		"expected_merkle_root": req.MerkleRoot,
+		"actual_merkle_root":   chainRoot,
+		"blockchain_tx_id":     req.BlockchainTxID,
+	})
 }

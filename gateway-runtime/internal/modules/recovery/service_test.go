@@ -8,6 +8,7 @@ import (
 
 	"go-blockchain-api/internal/models"
 	"go-blockchain-api/internal/storage/snapshotstore"
+	"go-blockchain-api/pkg/redaction"
 )
 
 func TestValidateSnapshotIdentityRejectsCrossLogAndHashMismatch(t *testing.T) {
@@ -38,32 +39,62 @@ func TestValidateSnapshotIdentityRejectsCrossLogAndHashMismatch(t *testing.T) {
 	}
 }
 
-func TestDecryptTamperedMetadataRestoresOriginalPayload(t *testing.T) {
+func TestDecryptTamperedMetadataRedactsStringAndObjectFormats(t *testing.T) {
 	cipher, err := snapshotstore.NewCipher("test-key", bytes.Repeat([]byte{0x42}, 32))
 	if err != nil {
 		t.Fatalf("NewCipher() error = %v", err)
 	}
-	plaintext, err := json.Marshal(map[string]string{
-		"metadata": `{"room":181,"owner":"tampered-before-recovery"}`,
-	})
-	if err != nil {
-		t.Fatalf("marshal tampered payload: %v", err)
-	}
-	encrypted, err := cipher.Encrypt(plaintext)
-	if err != nil {
-		t.Fatalf("Encrypt() error = %v", err)
+	cases := []struct {
+		name    string
+		payload map[string]interface{}
+	}{
+		{
+			name: "metadata encoded as a JSON string",
+			payload: map[string]interface{}{
+				"metadata": `{"room":181,"owner":"tampered-before-recovery","password":"clear","nested":{"api-token":"token-value"}}`,
+			},
+		},
+		{
+			name: "metadata encoded as an object",
+			payload: map[string]interface{}{
+				"metadata": map[string]interface{}{
+					"room": 181, "owner": "tampered-before-recovery", "password": "clear",
+					"nested": map[string]string{"api-token": "token-value"},
+				},
+			},
+		},
 	}
 
-	metadata, err := decryptTamperedMetadata(cipher, encrypted)
-	if err != nil {
-		t.Fatalf("decryptTamperedMetadata() error = %v", err)
-	}
-	values, ok := metadata.(map[string]interface{})
-	if !ok {
-		t.Fatalf("metadata type = %T, want map[string]interface{}", metadata)
-	}
-	if values["owner"] != "tampered-before-recovery" {
-		t.Fatalf("owner = %v, want original tampered value", values["owner"])
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			plaintext, err := json.Marshal(testCase.payload)
+			if err != nil {
+				t.Fatalf("marshal tampered payload: %v", err)
+			}
+			encrypted, err := cipher.Encrypt(plaintext)
+			if err != nil {
+				t.Fatalf("Encrypt() error = %v", err)
+			}
+
+			metadata, err := decryptTamperedMetadata(cipher, encrypted)
+			if err != nil {
+				t.Fatalf("decryptTamperedMetadata() error = %v", err)
+			}
+			values, ok := metadata.(map[string]interface{})
+			if !ok {
+				t.Fatalf("metadata type = %T, want map[string]interface{}", metadata)
+			}
+			if values["owner"] != "tampered-before-recovery" {
+				t.Fatalf("owner = %v, want original tampered value", values["owner"])
+			}
+			if values["password"] != redaction.Mask {
+				t.Fatalf("password = %v, want redacted value", values["password"])
+			}
+			nested, ok := values["nested"].(map[string]interface{})
+			if !ok || nested["api-token"] != redaction.Mask {
+				t.Fatalf("nested api-token was not redacted: %v", values["nested"])
+			}
+		})
 	}
 }
 
@@ -82,6 +113,19 @@ func TestServiceRecoveryCutoffKeepsLegacyOutOfScope(t *testing.T) {
 	newLog := &models.AuditLog{DBTimestamp: &newTime}
 	if !service.inRecoveryScope(newLog) {
 		t.Fatal("new audit log unexpectedly excluded from recovery scope")
+	}
+}
+
+func TestRecoveryModesSeparateDirectAndLegacySnapshotPaths(t *testing.T) {
+	service := NewService(nil, nil, nil, nil)
+	service.SetRecoveryMode("agent_direct")
+	if !service.directRecoveryEnabled() {
+		t.Fatal("agent_direct mode was not selected")
+	}
+
+	service.SetRecoveryMode("snapshot_legacy")
+	if service.directRecoveryEnabled() {
+		t.Fatal("snapshot_legacy mode unexpectedly selected the direct recovery path")
 	}
 }
 

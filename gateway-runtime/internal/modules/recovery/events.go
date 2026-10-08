@@ -389,6 +389,7 @@ func (s *Service) VerifyReadyEvents(ctx context.Context, limit int) error {
 			models.CDCStatusConfirmed,
 			models.CDCStatusConflict,
 			models.CDCStatusTimeout,
+			models.CDCStatusNotRequired,
 		}).
 		Order("executed_at ASC").
 		Limit(limit).

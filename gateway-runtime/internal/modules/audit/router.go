@@ -7,6 +7,12 @@ import (
 )
 
 func RegisterRoutes(routerGroup *gin.RouterGroup, h *Handler) {
+	agentAPI := routerGroup.Group("/agent")
+	{
+		agentAPI.GET("/offchain-data/:resource", h.GetOffchainDataForAgent)
+		agentAPI.POST("/verify-merkle-root", h.VerifyMerkleRootForAgent)
+	}
+
 	dashAPI := routerGroup.Group("/dashboard")
 	dashAPI.Use(middleware.JWTAuth())
 	{

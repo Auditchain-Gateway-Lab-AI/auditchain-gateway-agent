@@ -68,6 +68,7 @@ type CandidateView struct {
 	LogID                 string     `json:"log_id"`
 	Resource              string     `json:"resource,omitempty"`
 	Operation             string     `json:"operation,omitempty"`
+	RecoverySource        string     `json:"recovery_source,omitempty"`
 	ReferenceLogHash      string     `json:"reference_log_hash,omitempty"`
 	ReferenceMerkleRoot   string     `json:"reference_merkle_root,omitempty"`
 	ReferenceAnchorID     string     `json:"reference_anchor_id,omitempty"`
@@ -94,24 +95,28 @@ type SnapshotPreview struct {
 }
 
 type PreflightResult struct {
-	Status           string          `json:"status"`
-	Recoverable      bool            `json:"recoverable"`
-	LogID            string          `json:"log_id"`
-	CurrentHash      string          `json:"current_hash"`
-	CurrentIntegrity string          `json:"current_integrity"`
-	SnapshotHash     string          `json:"snapshot_hash"`
-	MerkleRoot       string          `json:"merkle_root"`
-	AnchorID         string          `json:"anchor_id"`
-	ObjectVersionID  string          `json:"object_version_id"`
-	SnapshotPreview  SnapshotPreview `json:"snapshot_preview"`
-	Operation        string          `json:"operation,omitempty"`
-	ReferenceLogHash string          `json:"reference_log_hash,omitempty"`
-	FabricRoot       string          `json:"fabric_root,omitempty"`
-	ClientStateHash  string          `json:"client_state_hash,omitempty"`
-	DesiredStateHash string          `json:"desired_state_hash,omitempty"`
-	SourceStatus     string          `json:"source_status,omitempty"`
-	AgentStatus      string          `json:"agent_status,omitempty"`
-	SourceFound      bool            `json:"source_found,omitempty"`
+	Status                  string           `json:"status"`
+	Recoverable             bool             `json:"recoverable"`
+	LogID                   string           `json:"log_id"`
+	RecoverySource          string           `json:"recovery_source,omitempty"`
+	CurrentHash             string           `json:"current_hash"`
+	CurrentIntegrity        string           `json:"current_integrity"`
+	SnapshotHash            string           `json:"snapshot_hash"`
+	MerkleRoot              string           `json:"merkle_root"`
+	AnchorID                string           `json:"anchor_id"`
+	ObjectVersionID         string           `json:"object_version_id"`
+	SnapshotPreview         SnapshotPreview  `json:"snapshot_preview"`
+	TrustedReferencePreview *SnapshotPreview `json:"trusted_reference_preview,omitempty"`
+	Operation               string           `json:"operation,omitempty"`
+	ReferenceLogHash        string           `json:"reference_log_hash,omitempty"`
+	ReferenceMerkleRoot     string           `json:"reference_merkle_root,omitempty"`
+	ReferenceAnchorID       string           `json:"reference_anchor_id,omitempty"`
+	FabricRoot              string           `json:"fabric_root,omitempty"`
+	ClientStateHash         string           `json:"client_state_hash,omitempty"`
+	DesiredStateHash        string           `json:"desired_state_hash,omitempty"`
+	SourceStatus            string           `json:"source_status,omitempty"`
+	AgentStatus             string           `json:"agent_status,omitempty"`
+	SourceFound             bool             `json:"source_found,omitempty"`
 }
 
 type CreateRequestInput struct {
@@ -259,24 +264,18 @@ func decryptTamperedMetadata(cipher *snapshotstore.Cipher, encrypted []byte) (in
 	}
 
 	// AuditLog.Metadata is stored as a JSON string, but accepting an object as
-	// well keeps this reader compatible with older evidence formats.
+	// well keeps this reader compatible with older evidence formats. Both paths
+	// must pass through the same redaction policy before evidence reaches a UI.
+	metadataJSON := payload.Metadata
 	var encodedMetadata string
 	if err := json.Unmarshal(payload.Metadata, &encodedMetadata); err == nil {
-		if encodedMetadata == "" {
+		if strings.TrimSpace(encodedMetadata) == "" {
 			return nil, nil
 		}
-		var metadata interface{}
-		if err := json.Unmarshal([]byte(encodedMetadata), &metadata); err != nil {
-			return encodedMetadata, nil
-		}
-		return metadata, nil
+		metadataJSON = []byte(encodedMetadata)
 	}
 
-	var metadata interface{}
-	if err := json.Unmarshal(payload.Metadata, &metadata); err != nil {
-		return nil, err
-	}
-	redacted, err := redaction.JSON(mustMarshalJSON(metadata))
+	redacted, err := redaction.JSON(metadataJSON)
 	if err != nil {
 		return nil, err
 	}
@@ -285,14 +284,6 @@ func decryptTamperedMetadata(cipher *snapshotstore.Cipher, encrypted []byte) (in
 		return nil, err
 	}
 	return safe, nil
-}
-
-func mustMarshalJSON(value interface{}) []byte {
-	encoded, err := json.Marshal(value)
-	if err != nil {
-		return []byte("null")
-	}
-	return encoded
 }
 
 func (s *Service) ListRequests(ctx context.Context, clientID, status string) ([]models.RecoveryRequest, error) {
@@ -358,6 +349,16 @@ func (s *Service) ListVersions(ctx context.Context, clientID, resource string) (
 
 func (s *Service) ListCandidates(ctx context.Context, clientID, incidentID string) ([]CandidateView, error) {
 	if s.directRecoveryEnabled() {
+		var directIncident models.TamperIncident
+		if err := s.db.WithContext(ctx).Where("id = ? AND client_id = ?", incidentID, clientID).First(&directIncident).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return nil, errors.New("incident_not_found")
+			}
+			return nil, err
+		}
+		if strings.EqualFold(strings.TrimSpace(directIncident.IncidentScope), models.RecoveryScopeGatewayIntegrity) {
+			return s.listGatewayAuditTrailCandidate(ctx, clientID, incidentID)
+		}
 		return s.listDirectCandidate(ctx, clientID, incidentID)
 	}
 	var incident models.TamperIncident
@@ -413,6 +414,16 @@ func (s *Service) ListCandidates(ctx context.Context, clientID, incidentID strin
 
 func (s *Service) Preflight(ctx context.Context, clientID, incidentID string) (*PreflightResult, error) {
 	if s.directRecoveryEnabled() {
+		var directIncident models.TamperIncident
+		if err := s.db.WithContext(ctx).Where("id = ? AND client_id = ?", incidentID, clientID).First(&directIncident).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return nil, errors.New("incident_not_found")
+			}
+			return nil, err
+		}
+		if strings.EqualFold(strings.TrimSpace(directIncident.IncidentScope), models.RecoveryScopeGatewayIntegrity) {
+			return s.preflightGatewayAuditTrail(ctx, clientID, incidentID)
+		}
 		return s.preflightDirect(ctx, clientID, incidentID)
 	}
 	var incident models.TamperIncident
@@ -504,6 +515,16 @@ func (s *Service) CreateRequest(ctx context.Context, clientID, userID string, in
 		return &existing, nil
 	}
 	if s.directRecoveryEnabled() {
+		var directIncident models.TamperIncident
+		if err := s.db.WithContext(ctx).Where("id = ? AND client_id = ?", input.IncidentID, clientID).First(&directIncident).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return nil, errors.New("incident_not_found")
+			}
+			return nil, err
+		}
+		if strings.EqualFold(strings.TrimSpace(directIncident.IncidentScope), models.RecoveryScopeGatewayIntegrity) {
+			return s.createGatewayAuditTrailRequest(ctx, clientID, userID, input)
+		}
 		return s.createDirectRequest(ctx, clientID, userID, input)
 	}
 
@@ -654,6 +675,23 @@ func (s *Service) transitionRequest(ctx context.Context, clientID, requestID, ac
 
 func (s *Service) Execute(ctx context.Context, clientID, requestID, executorID string) (*models.RecoveryRequest, error) {
 	if s.directRecoveryEnabled() {
+		var directRequest models.RecoveryRequest
+		if err := s.db.WithContext(ctx).Where("id = ? AND client_id = ?", requestID, clientID).First(&directRequest).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return nil, errors.New("request_not_found")
+			}
+			return nil, err
+		}
+		var directIncident models.TamperIncident
+		if err := s.db.WithContext(ctx).Where("id = ? AND client_id = ?", directRequest.IncidentID, clientID).First(&directIncident).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return nil, errors.New("incident_not_found")
+			}
+			return nil, err
+		}
+		if strings.EqualFold(strings.TrimSpace(directIncident.IncidentScope), models.RecoveryScopeGatewayIntegrity) {
+			return s.executeGatewayAuditTrail(ctx, clientID, requestID, executorID)
+		}
 		return s.executeDirect(ctx, clientID, requestID, executorID)
 	}
 	if s.store == nil || s.cipher == nil || s.snapshotBuilder == nil {

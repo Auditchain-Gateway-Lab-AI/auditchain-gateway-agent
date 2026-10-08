@@ -14,10 +14,15 @@ RECOVERY_CDC_TIMEOUT_SECONDS=120
 ```
 
 `agent_direct` adalah jalur baru: Fabric menjadi bukti anchor, PostgreSQL
-AuditChain menjadi referensi event/metadata, dan Agent menjadi satu-satunya
-komponen yang menulis row database operasional client. `snapshot_legacy` tetap
-tersedia sementara untuk kompatibilitas/rollback, tetapi memakai alur MinIO
-lama dan tidak boleh dicampur dengan request direct.
+AuditChain menjadi referensi event/metadata, dan Agent membaca riwayat sumber
+serta menjadi satu-satunya komponen yang menulis row operasional client.
+Gateway audit-log metadata dipulihkan dari event sumber Agent setelah hash,
+Merkle proof, dan Fabric anchor lolos verifikasi; alur ini tidak menggunakan
+MinIO. Mode `snapshot_legacy` hanya tersisa untuk kompatibilitas deployment lama.
+
+Tidak ada fallback ke metadata dari browser atau payload incident. Pemulihan
+Gateway hanya tersedia jika `source_record_id` pada audit log menunjuk ke event
+`audit_trail` yang masih dapat dibaca Agent.
 
 ## Endpoint
 
@@ -77,6 +82,29 @@ Response direct memuat minimal:
 
 Nilai metadata/state yang sensitif harus mengikuti redaction policy. Hash dan
 proof tetap boleh ditampilkan sebagai evidence teknis.
+
+## Gateway audit-log metadata recovery tanpa MinIO
+
+`GET /api/dashboard/verify/:log_id` tetap merupakan endpoint deteksi integritas.
+Respons `409 Conflict` dengan `failed_local` berarti metadata lokal berbeda dari
+hash AuditChain; respons itu bukan kegagalan endpoint dan bukan operasi restore.
+Setelah incident tercatat, kandidat/preflight `GATEWAY_INTEGRITY` membaca event
+asli melalui Agent (`GET /verify-audit/:source_record_id`), bukan
+`GET /verify/:table/:id` yang hanya membaca row operasional saat ini.
+
+Pemulihan hanya boleh berjalan jika metadata `data_lama`/`data_baru` dari Agent
+mereproduksi hash leaf yang sudah tersimpan, ordered Merkle proof mereproduksi
+root yang sama, dan Fabric mengembalikan root tersebut. Gateway kemudian
+memperbarui hanya `audit_logs.metadata` beserta status integritas, memverifikasi
+hash readback, dan mencatat recovery event baru untuk pipeline Merkle/Fabric.
+Jika source event tidak ditemukan, referensi tidak cocok, atau salah satu bukti
+gagal diverifikasi, request ditolak tanpa mengubah audit log.
+
+Agent membutuhkan akses baca ke tabel sejarah sumber. Default nama tabel adalah
+`AUDIT_TRAIL`; atur `AGENT_AUDIT_TRAIL_TABLE` dan, jika perlu,
+`AGENT_AUDIT_TRAIL_SCHEMA` pada Agent. `source_record_id` wajib terisi pada
+`audit_logs`; log lama tanpa referensi tersebut tidak dapat dipulihkan lewat
+jalur ini.
 
 ## Membuat dan mengeksekusi request
 
@@ -145,9 +173,9 @@ event recovery terverifikasi, request menjadi `SUCCEEDED` dan incident menjadi
 Dengan pemisahan ini, actor/source data client tidak berubah menjadi actor
 Gateway hanya karena Gateway menjalankan command recovery.
 
-## Legacy snapshot mode
+## Snapshot compatibility mode
 
-Mode `snapshot_legacy` tetap memakai validasi object version, checksum,
-AES-GCM, snapshot hash, Merkle proof, dan anchor Fabric. Mode tersebut hanya
-untuk compatibility/rollback; tidak boleh dianggap sebagai implementasi direct
-client-DB. Data lama yang tidak memiliki snapshot valid tetap tidak eligible.
+Mode `snapshot_legacy` masih memakai validasi object version, checksum, AES-GCM,
+snapshot hash, Merkle proof, dan anchor Fabric. Mode ini hanya untuk rollback
+deployment lama yang masih memiliki snapshot store; recovery aktif pada
+`agent_direct` tidak bergantung pada snapshot atau MinIO.

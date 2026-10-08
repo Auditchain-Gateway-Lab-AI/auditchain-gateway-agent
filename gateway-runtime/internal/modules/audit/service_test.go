@@ -1,10 +1,68 @@
 package audit
 
 import (
+	"errors"
 	"testing"
 
 	"go-blockchain-api/internal/models"
 )
+
+type verifyLogRepositoryStub struct {
+	AuditRepository
+	log models.AuditLog
+}
+
+func (r *verifyLogRepositoryStub) GetLogByID(logID, clientID string) (*models.AuditLog, error) {
+	if logID != r.log.LogID || clientID != r.log.ClientID {
+		return nil, errors.New("unexpected tenant-scoped log lookup")
+	}
+	logCopy := r.log
+	return &logCopy, nil
+}
+
+func (r *verifyLogRepositoryStub) GetLogsByResource(string, string) ([]models.AuditLog, error) {
+	return []models.AuditLog{r.log}, nil
+}
+
+func TestManualVerifyReportsTamperIncidentPersistenceFailure(t *testing.T) {
+	repo := &verifyLogRepositoryStub{log: models.AuditLog{
+		LogID:     "1791354247037786430",
+		ClientID:  "client-1",
+		Resource:  "RUANGAN:620",
+		Action:    "UPDATE",
+		Metadata:  `{"id":620,"nama":"tampered"}`,
+		HashValue: "trusted-hash",
+	}}
+	service := &auditService{repo: repo}
+
+	result, err := service.VerifyLogIntegrity(repo.log.LogID, repo.log.ClientID)
+	if !errors.Is(err, errIncidentPersistence) {
+		t.Fatalf("VerifyLogIntegrity error = %v, want tamper incident persistence error", err)
+	}
+	if result == nil || result.Status != "failed_local" {
+		t.Fatalf("VerifyLogIntegrity result = %+v, want local tamper result", result)
+	}
+	if result.IncidentType != "METADATA_HASH_MISMATCH" {
+		t.Fatalf("incident type = %q, want METADATA_HASH_MISMATCH", result.IncidentType)
+	}
+}
+
+func TestResourceVerifyReportsTamperIncidentPersistenceFailure(t *testing.T) {
+	repo := &verifyLogRepositoryStub{log: models.AuditLog{
+		LogID:     "1791354247037786430",
+		ClientID:  "client-1",
+		Resource:  "RUANGAN:620",
+		Action:    "RECOVERY",
+		Metadata:  `{"id":620,"nama":"tampered"}`,
+		HashValue: "trusted-hash",
+	}}
+	service := &auditService{repo: repo}
+
+	_, err := service.VerifyResourceHistory(repo.log.Resource, repo.log.ClientID)
+	if !errors.Is(err, errIncidentPersistence) {
+		t.Fatalf("VerifyResourceHistory error = %v, want incident persistence error", err)
+	}
+}
 
 func TestResourceGatewayStatusesDoNotUseAgentReachability(t *testing.T) {
 	tests := []struct {

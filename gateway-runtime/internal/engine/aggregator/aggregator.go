@@ -138,7 +138,7 @@ func (a *Engine) ProcessBatch(batchSize int) error {
 // immutable Agent readback evidence has been recorded.
 func (a *Engine) ProcessRecoveryBatch(batchSize int) error {
 	var events []models.RecoveryEvent
-	if err := a.DB.Where("pipeline_status = ? AND (snapshot_status = ? OR (source_snapshot_object_key = '' AND cdc_status IN ?))", models.RecoveryPipelineHashed, models.SnapshotStatusVerified, []string{models.CDCStatusConfirmed, models.CDCStatusConflict, models.CDCStatusTimeout}).
+	if err := a.DB.Where("pipeline_status = ? AND (snapshot_status = ? OR (source_snapshot_object_key = '' AND cdc_status IN ?))", models.RecoveryPipelineHashed, models.SnapshotStatusVerified, []string{models.CDCStatusConfirmed, models.CDCStatusConflict, models.CDCStatusTimeout, models.CDCStatusNotRequired}).
 		Order("executed_at asc").Limit(batchSize).Find(&events).Error; err != nil {
 		return err
 	}

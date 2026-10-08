@@ -65,6 +65,12 @@ RECOVERY_MODE=agent_direct
 RECOVERY_CDC_TIMEOUT_SECONDS=120
 ```
 
+Untuk memulihkan metadata audit log Gateway, pastikan Agent tenant dapat
+membaca tabel `AUDIT_TRAIL` dan log memiliki `source_record_id`. Gateway
+membangun metadata dari event tersebut lalu memvalidasi hash leaf, Merkle proof,
+dan anchor Fabric. Jalur aktif ini tidak memakai MinIO. Log tanpa source event
+atau bukti anchor tetap read-only.
+
 Mode `snapshot_legacy` tetap dapat dijalankan untuk rollback/kompatibilitas
 dengan `docker-compose.snapshot.yml`; mode tersebut membutuhkan konfigurasi
 MinIO yang lengkap dan tidak boleh menjadi dependency deployment direct.

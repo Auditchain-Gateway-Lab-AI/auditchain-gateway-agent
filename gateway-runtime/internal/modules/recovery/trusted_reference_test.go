@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"go-blockchain-api/internal/blockchain/agentverifier"
 	"go-blockchain-api/internal/engine/hasher"
 	"go-blockchain-api/internal/models"
 	"go-blockchain-api/pkg/crypto"
@@ -57,6 +58,65 @@ func TestValidateTrustedReferenceAcceptsSingleLeaf(t *testing.T) {
 	}
 	if trusted.LeafHash != logRow.HashValue || trusted.FabricRoot != logRow.HashValue {
 		t.Fatalf("trusted reference = %+v", trusted)
+	}
+}
+
+func TestTrustedGatewayLogFromAuditTrailRestoresOnlyHashMatchingMetadata(t *testing.T) {
+	logRow := trustedReferenceLog()
+	logRow.SourceRecordID = "audit-81"
+	logRow.Metadata = `{"data_lama":{"ID":81,"NAMA":"sebelum"},"data_baru":{"ID":81,"NAMA":"ruang"}}`
+	logRow.HashValue = hasher.GenerateLogHash(&logRow)
+	logRow.Metadata = `{"data_lama":{"ID":81,"NAMA":"sebelum"},"data_baru":{"ID":81,"NAMA":"tampered"}}`
+
+	trail := &agentverifier.AuditTrailRecord{
+		Found: true, ID: "audit-81", Tabel: "RUANGAN", Operasi: "UPDATE",
+		DataLama: map[string]interface{}{"ID": float64(81), "NAMA": "sebelum"},
+		DataBaru: map[string]interface{}{"ID": float64(81), "NAMA": "ruang"},
+	}
+	trusted, _, err := trustedGatewayLogFromAuditTrail(logRow, trail)
+	if err != nil {
+		t.Fatalf("trustedGatewayLogFromAuditTrail() error = %v", err)
+	}
+	if trusted.Metadata != `{"data_baru":{"ID":81,"NAMA":"ruang"},"data_lama":{"ID":81,"NAMA":"sebelum"}}` {
+		t.Fatalf("restored metadata = %s", trusted.Metadata)
+	}
+
+	trail.DataBaru["NAMA"] = "untrusted"
+	if _, _, err := trustedGatewayLogFromAuditTrail(logRow, trail); err == nil || err.Error() != "reference_local_hash_mismatch" {
+		t.Fatalf("mismatched source payload error = %v", err)
+	}
+}
+
+func TestTrustedGatewayLogFromAuditTrailMatchesKafkaRowImage(t *testing.T) {
+	logRow := trustedReferenceLog()
+	logRow.Action = "DELETE"
+	logRow.Resource = "RUANGAN:613"
+	logRow.Metadata = `{"ID":613,"NAMA":"trusted name"}`
+	logRow.HashValue = hasher.GenerateLogHash(&logRow)
+	logRow.Metadata = `{"ID":613,"NAMA":"tampered name"}`
+
+	trail := &agentverifier.AuditTrailRecord{
+		Found: true, ID: "audit-613", Tabel: "RUANGAN", Operasi: "DELETE",
+		DataLama: map[string]interface{}{"ID": float64(613), "NAMA": "trusted name"},
+	}
+	trusted, metadata, err := trustedGatewayLogFromAuditTrail(logRow, trail)
+	if err != nil {
+		t.Fatalf("trustedGatewayLogFromAuditTrail() error = %v", err)
+	}
+	if trusted.Metadata != `{"ID":613,"NAMA":"trusted name"}` || string(metadata) != trusted.Metadata {
+		t.Fatalf("restored metadata = %s, bytes = %s", trusted.Metadata, metadata)
+	}
+}
+
+func TestAuditTrailImageMatchesConfiguredPrimaryKey(t *testing.T) {
+	trail := &agentverifier.AuditTrailRecord{
+		DataLama: map[string]interface{}{"ROOM_ID": "613"},
+	}
+	if !auditTrailImageMatchesID(trail, "room_id", "613") {
+		t.Fatal("expected configured primary key to match case-insensitively")
+	}
+	if auditTrailImageMatchesID(trail, "room_id", "614") {
+		t.Fatal("unexpected primary-key match")
 	}
 }
 

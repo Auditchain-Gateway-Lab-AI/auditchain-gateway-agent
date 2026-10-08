@@ -319,10 +319,12 @@ func (s *Service) preflightDirect(ctx context.Context, clientID, incidentID stri
 	}
 	return &PreflightResult{
 		Status: status, Recoverable: recoverable, LogID: data.Log.LogID,
-		CurrentHash: localHash, CurrentIntegrity: currentIntegrity,
+		RecoverySource: "CLIENT_AUDIT_CHAIN",
+		CurrentHash:    localHash, CurrentIntegrity: currentIntegrity,
 		SnapshotHash: data.Reference.LeafHash, MerkleRoot: data.Reference.MerkleRoot,
 		AnchorID: data.Reference.AnchorID, ObjectVersionID: "",
 		Operation: data.Operation, ReferenceLogHash: data.Reference.LeafHash,
+		ReferenceMerkleRoot: data.Reference.MerkleRoot, ReferenceAnchorID: data.Reference.AnchorID,
 		FabricRoot: data.Reference.FabricRoot, ClientStateHash: data.ClientHash,
 		DesiredStateHash: data.DesiredHash, SourceStatus: data.SourceStatus,
 		AgentStatus: data.AgentStatus, SourceFound: data.Client != nil && data.Client.Found,

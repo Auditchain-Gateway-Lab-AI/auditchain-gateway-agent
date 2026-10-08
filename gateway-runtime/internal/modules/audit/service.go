@@ -30,10 +30,42 @@ type VerificationResult struct {
 	DBRoot             string                      `json:"db_root"`
 	ChainRoot          string                      `json:"chain_root"`
 	LogID              string                      `json:"log_id"`
+	IncidentID         string                      `json:"incident_id,omitempty"`
+	IncidentScope      string                      `json:"incident_scope,omitempty"`
+	IncidentType       string                      `json:"incident_type,omitempty"`
+	IncidentStatus     string                      `json:"incident_status,omitempty"`
 	TxID               *string                     `json:"blockchain_tx_id,omitempty"`
 	AgentStatus        string                      `json:"agent_status,omitempty"`
 	SourceStatus       string                      `json:"source_status,omitempty"`
+	SourceStateHash    string                      `json:"-"`
 	AgentDiscrepancies []agentverifier.Discrepancy `json:"agent_discrepancies,omitempty"`
+}
+
+var errIncidentPersistence = errors.New("recovery incident persistence failed")
+
+type IncidentPersistenceError struct {
+	LogID         string
+	IncidentType  string
+	IncidentScope string
+	Cause         error
+}
+
+func (e *IncidentPersistenceError) Error() string {
+	if e == nil || e.Cause == nil {
+		return errIncidentPersistence.Error()
+	}
+	return fmt.Sprintf("%s: %v", errIncidentPersistence, e.Cause)
+}
+
+func (e *IncidentPersistenceError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Cause
+}
+
+func (e *IncidentPersistenceError) Is(target error) bool {
+	return target == errIncidentPersistence
 }
 
 type DataVerificationResult struct {
@@ -107,6 +139,8 @@ type auditService struct {
 type ResourceLogVerification struct {
 	LogID           string `json:"log_id"`
 	Resource        string `json:"resource"` // Menyimpan nama/id resource
+	IncidentID      string `json:"incident_id,omitempty"`
+	IncidentScope   string `json:"incident_scope,omitempty"`
 	Action          string `json:"action"`
 	LastAction      string `json:"last_action"` // Alias untuk kompabilitas frontend
 	Actor           string `json:"actor"`
@@ -127,7 +161,8 @@ type ResourceLogVerification struct {
 	RecoveryExecutedAt *time.Time `json:"recovery_executed_at,omitempty"`
 	// SourceStatus is the live-client comparison dimension. It must not be
 	// folded into IntegrityStatus/ChainStatus, which describe Gateway + Fabric.
-	SourceStatus string `json:"source_status,omitempty"`
+	SourceStatus    string `json:"source_status,omitempty"`
+	SourceStateHash string `json:"-"`
 	// IsLatest marks the newest event in the timeline. A RECOVERY event can be
 	// latest because it is a valid AuditChain event.
 	IsLatest bool `json:"is_latest"`
@@ -621,7 +656,7 @@ func isHashStillPending(auditLog *models.AuditLog) bool {
 func (s *auditService) VerifyLogIntegrity(logID, clientID string) (*VerificationResult, error) {
 	result, err := s.verifyLogIntegrity(logID, clientID, "", false)
 	status := models.IntegrityStatusUnreachable
-	if err == nil && result != nil {
+	if result != nil {
 		switch result.Status {
 		case "success":
 			status = models.IntegrityStatusValid
@@ -634,6 +669,44 @@ func (s *auditService) VerifyLogIntegrity(logID, clientID string) (*Verification
 	if result != nil {
 		s.persistIntegrityStatus(result.LogID, clientID, status, models.IntegritySourceManualSingleLog, "", err)
 		s.recordLatestIntegrityCheck(clientID, models.IntegritySourceManualSingleLog, "", 1)
+		if err == nil && result.IncidentType != "" {
+			auditLog, lookupErr := s.repo.GetLogByID(result.LogID, clientID)
+			if lookupErr != nil {
+				return result, &IncidentPersistenceError{
+					LogID: result.LogID, IncidentType: result.IncidentType,
+					IncidentScope: models.RecoveryScopeGatewayIntegrity, Cause: lookupErr,
+				}
+			}
+			incident, persistErr := s.ensureTamperIncident(*auditLog, result.IncidentType, result.ActualHash)
+			if persistErr != nil {
+				return result, &IncidentPersistenceError{
+					LogID: result.LogID, IncidentType: result.IncidentType,
+					IncidentScope: models.RecoveryScopeGatewayIntegrity, Cause: persistErr,
+				}
+			}
+			result.IncidentID = incident.ID
+			result.IncidentScope = incident.IncidentScope
+			result.IncidentStatus = incident.Status
+		} else if err == nil && isClientSourceIncidentStatus(result.SourceStatus) {
+			auditLog, lookupErr := s.repo.GetLogByID(result.LogID, clientID)
+			if lookupErr != nil {
+				return result, &IncidentPersistenceError{
+					LogID: result.LogID, IncidentType: clientSourceIncidentType(result.SourceStatus),
+					IncidentScope: models.RecoveryScopeClientSource, Cause: lookupErr,
+				}
+			}
+			incident, persistErr := s.ensureClientSourceIncident(*auditLog, result.SourceStatus, result.SourceStateHash, result.AgentDiscrepancies)
+			if persistErr != nil {
+				return result, &IncidentPersistenceError{
+					LogID: result.LogID, IncidentType: clientSourceIncidentType(result.SourceStatus),
+					IncidentScope: models.RecoveryScopeClientSource, Cause: persistErr,
+				}
+			}
+			result.IncidentID = incident.ID
+			result.IncidentScope = incident.IncidentScope
+			result.IncidentType = incident.IncidentType
+			result.IncidentStatus = incident.Status
+		}
 	}
 	return result, err
 }
@@ -852,6 +925,7 @@ func (s *auditService) verifyLogIntegrity(logID, clientID, requestID string, ski
 			Message:      "🚨 DATA TERMANIPULASI: Isi data telah diubah di database middleware.",
 			IsValid:      false,
 			LogID:        auditLog.LogID,
+			IncidentType: "METADATA_HASH_MISMATCH",
 			ExpectedHash: auditLog.HashValue,
 			ActualHash:   recalculatedHash,
 		}, nil
@@ -897,12 +971,15 @@ func (s *auditService) verifyLogIntegrity(logID, clientID, requestID string, ski
 	if auditLog.MerkleRoot != "" && auditLog.MerkleRoot != fabricResponse.MerkleRoot {
 		s.recordTamperIncident(*auditLog, "MERKLE_ROOT_MISMATCH", recalculatedHash)
 		return &VerificationResult{
-			Status:    "failed_onchain",
-			Message:   "🚨 DATA TERMANIPULASI: Merkle root pada database berbeda dari anchor Fabric.",
-			IsValid:   false,
-			LogID:     auditLog.LogID,
-			DBRoot:    auditLog.MerkleRoot,
-			ChainRoot: fabricResponse.MerkleRoot,
+			Status:       "failed_onchain",
+			Message:      "🚨 DATA TERMANIPULASI: Merkle root pada database berbeda dari anchor Fabric.",
+			IsValid:      false,
+			LogID:        auditLog.LogID,
+			IncidentType: "MERKLE_ROOT_MISMATCH",
+			ExpectedHash: auditLog.HashValue,
+			ActualHash:   recalculatedHash,
+			DBRoot:       auditLog.MerkleRoot,
+			ChainRoot:    fabricResponse.MerkleRoot,
 		}, nil
 	}
 
@@ -914,12 +991,15 @@ func (s *auditService) verifyLogIntegrity(logID, clientID, requestID string, ski
 		if auditLog.MerkleRoot != fabricResponse.MerkleRoot {
 			s.recordTamperIncident(*auditLog, "MERKLE_ROOT_MISMATCH", recalculatedHash)
 			return &VerificationResult{
-				Status:    "failed_onchain",
-				Message:   "🚨 FATAL MISMATCH: Merkle Root tidak diakui oleh jaringan Blockchain!",
-				IsValid:   false,
-				LogID:     auditLog.LogID,
-				DBRoot:    reconstructedRoot,
-				ChainRoot: fabricResponse.MerkleRoot,
+				Status:       "failed_onchain",
+				Message:      "🚨 FATAL MISMATCH: Merkle Root tidak diakui oleh jaringan Blockchain!",
+				IsValid:      false,
+				LogID:        auditLog.LogID,
+				IncidentType: "MERKLE_ROOT_MISMATCH",
+				ExpectedHash: auditLog.HashValue,
+				ActualHash:   recalculatedHash,
+				DBRoot:       reconstructedRoot,
+				ChainRoot:    fabricResponse.MerkleRoot,
 			}, nil
 		}
 		verifiedVia = "legacy_field_fallback"
@@ -932,6 +1012,7 @@ func (s *auditService) verifyLogIntegrity(logID, clientID, requestID string, ski
 
 	agentStatus := "skipped_historical"
 	sourceStatus := ""
+	sourceStateHash := ""
 	var agentDiscrepancies []agentverifier.Discrepancy
 
 	if !skipAgent {
@@ -960,6 +1041,7 @@ func (s *auditService) verifyLogIntegrity(logID, clientID, requestID string, ski
 					} else {
 						agentStatus = "mismatch"
 						sourceStatus = sourceStatusFromAgentResult(*auditLog, agentResult)
+						sourceStateHash = agentResult.ClientStateHash
 						agentDiscrepancies = agentResult.Discrepancies
 						s.recordClientSourceIncident(*auditLog, sourceStatusFromAgentResult(*auditLog, agentResult), agentResult.ClientStateHash, agentResult.Discrepancies)
 					}
@@ -980,6 +1062,7 @@ func (s *auditService) verifyLogIntegrity(logID, clientID, requestID string, ski
 		TxID:               auditLog.BlockchainTxID,
 		AgentStatus:        agentStatus,
 		SourceStatus:       sourceStatus,
+		SourceStateHash:    sourceStateHash,
 		AgentDiscrepancies: agentDiscrepancies,
 	}, nil
 }
@@ -1252,38 +1335,69 @@ func (s *auditService) classifyIntegrity(auditLog models.AuditLog) string {
 // Verifikasi dashboard dapat dipanggil berkali-kali, sehingga operasi ini
 // harus idempoten dan tidak boleh membuat baris incident baru pada setiap GET.
 func (s *auditService) recordTamperIncident(auditLog models.AuditLog, incidentType, detectedHash string) {
-	if s.db == nil || auditLog.LogID == "" || auditLog.ClientID == "" {
-		return
+	if _, err := s.ensureTamperIncident(auditLog, incidentType, detectedHash); err != nil {
+		log.Printf("[RecoveryIncident] gagal menyimpan client=%s log=%s type=%s: %v", auditLog.ClientID, auditLog.LogID, incidentType, err)
+	}
+}
+
+func (s *auditService) ensureTamperIncident(auditLog models.AuditLog, incidentType, detectedHash string) (*models.TamperIncident, error) {
+	if s.db == nil {
+		return nil, fmt.Errorf("%w: database unavailable", errIncidentPersistence)
+	}
+	if strings.TrimSpace(auditLog.LogID) == "" || strings.TrimSpace(auditLog.ClientID) == "" || strings.TrimSpace(incidentType) == "" {
+		return nil, fmt.Errorf("%w: log, client, or incident type is empty", errIncidentPersistence)
+	}
+
+	existing, err := s.dbOpenGatewayIncident(auditLog.ClientID, auditLog.LogID, incidentType)
+	if err == nil {
+		return existing, nil
+	}
+	if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, fmt.Errorf("%w: lookup active incident: %v", errIncidentPersistence, err)
+	}
+	incident := &models.TamperIncident{
+		ID:                 uuid.NewString(),
+		ClientID:           auditLog.ClientID,
+		LogID:              auditLog.LogID,
+		Resource:           auditLog.Resource,
+		IncidentType:       incidentType,
+		ExpectedHash:       auditLog.HashValue,
+		DetectedHash:       detectedHash,
+		DiscrepancySummary: "[]",
+		Status:             models.IncidentStatusOpen,
+		IncidentScope:      models.RecoveryScopeGatewayIntegrity,
+		DetectedAt:         time.Now().UTC(),
+	}
+	if err := s.db.Create(incident).Error; err != nil {
+		// The partial unique index makes concurrent verification idempotent. If
+		// another request inserted the active incident first, return that row;
+		// otherwise expose the database error to the synchronous verifier.
+		existing, lookupErr := s.dbOpenGatewayIncident(auditLog.ClientID, auditLog.LogID, incidentType)
+		if lookupErr == nil {
+			return existing, nil
+		}
+		return nil, fmt.Errorf("%w: insert active incident: %v", errIncidentPersistence, err)
+	}
+	return incident, nil
+}
+
+func (s *auditService) dbOpenGatewayIncident(clientID, logID, incidentType string) (*models.TamperIncident, error) {
+	if s.db == nil {
+		return nil, fmt.Errorf("%w: database unavailable", errIncidentPersistence)
 	}
 	var existing models.TamperIncident
 	err := s.db.Where(
-		"client_id = ? AND log_id = ? AND incident_type = ? AND status = ?",
-		auditLog.ClientID,
-		auditLog.LogID,
+		"client_id = ? AND log_id = ? AND incident_type = ? AND incident_scope = ? AND status = ?",
+		clientID,
+		logID,
 		incidentType,
+		models.RecoveryScopeGatewayIntegrity,
 		models.IncidentStatusOpen,
 	).First(&existing).Error
-	if err == nil {
-		return
+	if err != nil {
+		return nil, err
 	}
-	if !errors.Is(err, gorm.ErrRecordNotFound) {
-		return
-	}
-	incident := &models.TamperIncident{
-		ID:           uuid.NewString(),
-		ClientID:     auditLog.ClientID,
-		LogID:        auditLog.LogID,
-		Resource:     auditLog.Resource,
-		IncidentType: incidentType,
-		ExpectedHash: auditLog.HashValue,
-		DetectedHash: detectedHash,
-		Status:       models.IncidentStatusOpen,
-		DetectedAt:   time.Now().UTC(),
-	}
-	// A concurrent verification may win the insert race. The unique/lookup
-	// guard is intentionally best-effort; verification itself remains read-only
-	// from the caller's perspective if this insert fails.
-	_ = s.db.Create(incident).Error
+	return &existing, nil
 }
 
 func sourceStatusFromAgentResult(auditLog models.AuditLog, result *agentverifier.VerifyResult) string {
@@ -1322,16 +1436,42 @@ func sourceStatusFromAgentStatus(status string) string {
 // from Gateway/Fabric integrity incidents: the AuditChain evidence can remain
 // VALID while the client source is MISMATCH/MISSING/UNEXPECTED_PRESENT.
 func (s *auditService) recordClientSourceIncident(auditLog models.AuditLog, sourceStatus, detectedStateHash string, discrepancies []agentverifier.Discrepancy) {
-	if s.db == nil || strings.TrimSpace(auditLog.ClientID) == "" || strings.TrimSpace(auditLog.Resource) == "" || strings.TrimSpace(sourceStatus) == "" || sourceStatus == models.SourceStatusMatched {
-		return
+	if _, err := s.ensureClientSourceIncident(auditLog, sourceStatus, detectedStateHash, discrepancies); err != nil {
+		log.Printf("[RecoveryIncident] gagal menyimpan client-source client=%s log=%s status=%s: %v", auditLog.ClientID, auditLog.LogID, sourceStatus, err)
 	}
-	incidentType := "CLIENT_STATE_MISMATCH"
-	switch sourceStatus {
+}
+
+func isClientSourceIncidentStatus(sourceStatus string) bool {
+	switch strings.ToUpper(strings.TrimSpace(sourceStatus)) {
+	case models.SourceStatusMismatch, models.SourceStatusMissing, models.SourceStatusUnexpectedPresent:
+		return true
+	default:
+		return false
+	}
+}
+
+func clientSourceIncidentType(sourceStatus string) string {
+	switch strings.ToUpper(strings.TrimSpace(sourceStatus)) {
 	case models.SourceStatusMissing:
-		incidentType = "CLIENT_ROW_MISSING"
+		return "CLIENT_ROW_MISSING"
 	case models.SourceStatusUnexpectedPresent:
-		incidentType = "CLIENT_ROW_UNEXPECTED_PRESENT"
+		return "CLIENT_ROW_UNEXPECTED_PRESENT"
+	default:
+		return "CLIENT_STATE_MISMATCH"
 	}
+}
+
+func (s *auditService) ensureClientSourceIncident(auditLog models.AuditLog, sourceStatus, detectedStateHash string, discrepancies []agentverifier.Discrepancy) (*models.TamperIncident, error) {
+	if !isClientSourceIncidentStatus(sourceStatus) {
+		return nil, nil
+	}
+	if s.db == nil {
+		return nil, fmt.Errorf("%w: database unavailable", errIncidentPersistence)
+	}
+	if strings.TrimSpace(auditLog.ClientID) == "" || strings.TrimSpace(auditLog.Resource) == "" || strings.TrimSpace(auditLog.LogID) == "" {
+		return nil, fmt.Errorf("%w: client, resource, or log is empty", errIncidentPersistence)
+	}
+	incidentType := clientSourceIncidentType(sourceStatus)
 	// Do not persist client row values in the incident table. The hash and the
 	// field names are enough to correlate the source-state problem; raw values
 	// may contain credentials, identifiers, or other client-sensitive data.
@@ -1353,7 +1493,7 @@ func (s *auditService) recordClientSourceIncident(auditLog models.AuditLog, sour
 	).First(&existing).Error
 	now := time.Now().UTC()
 	if lookupErr == nil {
-		_ = s.db.Model(&existing).Updates(map[string]interface{}{
+		if err := s.db.Model(&existing).Updates(map[string]interface{}{
 			"log_id":              auditLog.LogID,
 			"expected_hash":       auditLog.HashValue,
 			"detected_hash":       detectedStateHash,
@@ -1362,11 +1502,21 @@ func (s *auditService) recordClientSourceIncident(auditLog models.AuditLog, sour
 			"reference_log_id":    auditLog.LogID,
 			"discrepancy_summary": string(redacted),
 			"last_confirmed_at":   now,
-		}).Error
-		return
+		}).Error; err != nil {
+			return nil, fmt.Errorf("%w: update active client-source incident: %v", errIncidentPersistence, err)
+		}
+		existing.LogID = auditLog.LogID
+		existing.ExpectedHash = auditLog.HashValue
+		existing.DetectedHash = detectedStateHash
+		existing.DetectedStateHash = detectedStateHash
+		existing.SourceStatus = sourceStatus
+		existing.ReferenceLogID = auditLog.LogID
+		existing.DiscrepancySummary = string(redacted)
+		existing.LastConfirmedAt = &now
+		return &existing, nil
 	}
 	if !errors.Is(lookupErr, gorm.ErrRecordNotFound) {
-		return
+		return nil, fmt.Errorf("%w: lookup active client-source incident: %v", errIncidentPersistence, lookupErr)
 	}
 	incident := &models.TamperIncident{
 		ID: uuid.NewString(), ClientID: auditLog.ClientID, LogID: auditLog.LogID,
@@ -1377,7 +1527,21 @@ func (s *auditService) recordClientSourceIncident(auditLog models.AuditLog, sour
 		DetectedStateHash: detectedStateHash, DiscrepancySummary: string(redacted),
 		DetectedAt: now, LastConfirmedAt: &now,
 	}
-	_ = s.db.Create(incident).Error
+	if err := s.db.Create(incident).Error; err != nil {
+		// Concurrent checks for the same resource may race on the resource-level
+		// active index. Return the winning row when it exists; otherwise surface
+		// the persistence failure to the synchronous verification endpoint.
+		var existing models.TamperIncident
+		lookupErr := s.db.Where(
+			"client_id = ? AND resource = ? AND incident_type = ? AND incident_scope = ? AND status = ?",
+			auditLog.ClientID, auditLog.Resource, incidentType, models.RecoveryScopeClientSource, models.IncidentStatusOpen,
+		).First(&existing).Error
+		if lookupErr == nil {
+			return &existing, nil
+		}
+		return nil, fmt.Errorf("%w: insert active client-source incident: %v", errIncidentPersistence, err)
+	}
+	return incident, nil
 }
 
 // GetRecentLogsPaginated menggantikan limit-500 lama dengan pagination
@@ -1581,6 +1745,29 @@ func (s *auditService) VerifyResourceHistory(resource, clientID string) (*Resour
 	latestClientIndex := latestClientEventIndex(logs)
 	for i, auditLog := range logs {
 		item := s.classifyResourceLog(auditLog, i == lastIndex, i == latestClientIndex)
+		if strings.EqualFold(item.IntegrityStatus, "tampered") {
+			incident, persistErr := s.ensureResourceTamperIncident(auditLog)
+			if persistErr != nil {
+				return nil, &IncidentPersistenceError{
+					LogID: auditLog.LogID, IncidentType: incidentTypeForResourceTamper(auditLog), Cause: persistErr,
+				}
+			}
+			item.IncidentID = incident.ID
+			item.IncidentScope = models.RecoveryScopeGatewayIntegrity
+		}
+		if isClientSourceIncidentStatus(item.SourceStatus) {
+			incident, persistErr := s.ensureClientSourceIncident(auditLog, item.SourceStatus, item.SourceStateHash, item.AgentDiscrepancies)
+			if persistErr != nil {
+				return nil, &IncidentPersistenceError{
+					LogID: auditLog.LogID, IncidentType: clientSourceIncidentType(item.SourceStatus),
+					IncidentScope: models.RecoveryScopeClientSource, Cause: persistErr,
+				}
+			}
+			if item.IncidentID == "" {
+				item.IncidentID = incident.ID
+				item.IncidentScope = incident.IncidentScope
+			}
+		}
 		result.Logs = append(result.Logs, item)
 
 		// baseIntegrityFailed dicek terpisah dari AgentStatus supaya
@@ -1638,6 +1825,16 @@ func (s *auditService) GetTableResources(tableName, clientID string) ([]Resource
 	results := make([]ResourceLogVerification, 0, len(logs))
 	for _, auditLog := range logs {
 		item := s.classifyResourceLog(auditLog, false, false)
+		if strings.EqualFold(item.IntegrityStatus, "tampered") {
+			incident, persistErr := s.ensureResourceTamperIncident(auditLog)
+			if persistErr != nil {
+				return nil, &IncidentPersistenceError{
+					LogID: auditLog.LogID, IncidentType: incidentTypeForResourceTamper(auditLog), Cause: persistErr,
+				}
+			}
+			item.IncidentID = incident.ID
+			item.IncidentScope = incident.IncidentScope
+		}
 		results = append(results, item)
 	}
 	if err := s.enrichRecoveryStatuses(clientID, results); err != nil {
@@ -1645,6 +1842,21 @@ func (s *auditService) GetTableResources(tableName, clientID string) ([]Resource
 	}
 
 	return results, nil
+}
+
+func incidentTypeForResourceTamper(auditLog models.AuditLog) string {
+	logCopy := auditLog
+	canonicalizeLog(&logCopy)
+	if hasher.GenerateLogHash(&logCopy) != auditLog.HashValue {
+		return "METADATA_HASH_MISMATCH"
+	}
+	return "MERKLE_ROOT_MISMATCH"
+}
+
+func (s *auditService) ensureResourceTamperIncident(auditLog models.AuditLog) (*models.TamperIncident, error) {
+	logCopy := auditLog
+	canonicalizeLog(&logCopy)
+	return s.ensureTamperIncident(auditLog, incidentTypeForResourceTamper(auditLog), hasher.GenerateLogHash(&logCopy))
 }
 
 func toMerkleProofData(proofs []models.MerkleProof) []crypto.MerkleProofData {
@@ -1710,6 +1922,7 @@ func (s *auditService) classifyResourceLog(auditLog models.AuditLog, isLatest, i
 		} else {
 			item.AgentStatus = "mismatch"
 			item.SourceStatus = sourceStatusFromAgentResult(auditLog, agentResult)
+			item.SourceStateHash = agentResult.ClientStateHash
 			item.AgentDiscrepancies = agentResult.Discrepancies
 			if baseStatus == "valid" {
 				s.recordClientSourceIncident(auditLog, item.SourceStatus, agentResult.ClientStateHash, agentResult.Discrepancies)

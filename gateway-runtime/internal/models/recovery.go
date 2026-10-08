@@ -48,10 +48,11 @@ const (
 	RecoveryOperationDelete = "DELETE"
 	RecoveryOperationNoop   = "NOOP"
 
-	CDCStatusPending   = "PENDING"
-	CDCStatusConfirmed = "CONFIRMED"
-	CDCStatusTimeout   = "TIMEOUT"
-	CDCStatusConflict  = "CONFLICT"
+	CDCStatusPending     = "PENDING"
+	CDCStatusConfirmed   = "CONFIRMED"
+	CDCStatusTimeout     = "TIMEOUT"
+	CDCStatusConflict    = "CONFLICT"
+	CDCStatusNotRequired = "NOT_REQUIRED"
 
 	RecoveryEventTypeExecution = "RECOVERY_EXECUTION"
 	RecoveryResultSucceeded    = "SUCCEEDED"
