@@ -202,6 +202,35 @@ func TestHandleLookupAuditTrailValidatesBoundedQuery(t *testing.T) {
 	}
 }
 
+func TestWriteQueryErrorClassifiesAuditTrailLookupFailures(t *testing.T) {
+	tests := []struct {
+		name     string
+		err      error
+		status   int
+		wantCode string
+	}{
+		{name: "missing configured audit table", err: errAuditTrailProjectionMiss, status: http.StatusNotFound, wantCode: "audit_trail_table_not_found"},
+		{name: "query failed", err: errAuditTrailCandidateLookup, status: http.StatusInternalServerError, wantCode: "audit_trail_lookup_failed"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			server := NewServer(nil, "", "9090")
+			response := httptest.NewRecorder()
+			server.writeQueryError(response, test.err)
+			if response.Code != test.status {
+				t.Fatalf("status = %d, want %d", response.Code, test.status)
+			}
+			var payload map[string]string
+			if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+				t.Fatalf("decode error response: %v", err)
+			}
+			if payload["code"] != test.wantCode {
+				t.Fatalf("code = %q, want %q", payload["code"], test.wantCode)
+			}
+		})
+	}
+}
+
 func TestDecodeAuditImage(t *testing.T) {
 	image, err := decodeAuditImage(sql.NullString{String: `{"ID":620,"nama":"ruangan"}`, Valid: true})
 	if err != nil {
