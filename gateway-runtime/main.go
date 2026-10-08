@@ -330,13 +330,70 @@ func startPipelineWorker(ctx context.Context, db *gorm.DB, fabricSvc *blockchain
 	}()
 }
 
+const (
+	runtimeCommandServe   = "serve"
+	runtimeCommandMigrate = "migrate"
+)
+
+func parseRuntimeCommand(args []string) (string, error) {
+	if len(args) == 0 {
+		return runtimeCommandServe, nil
+	}
+	if len(args) != 1 {
+		return "", fmt.Errorf("provide exactly one command: serve or migrate")
+	}
+	switch args[0] {
+	case runtimeCommandServe, runtimeCommandMigrate:
+		return args[0], nil
+	default:
+		return "", fmt.Errorf("unknown command %q: expected serve or migrate", args[0])
+	}
+}
+
+func runDatabaseMigration() error {
+	db, err := config.OpenDB(os.Getenv("DB_MIGRATION_DSN"))
+	if err != nil {
+		return fmt.Errorf("open migration database: %w", err)
+	}
+	sqlDB, err := db.DB()
+	if err != nil {
+		return fmt.Errorf("get migration database pool: %w", err)
+	}
+	defer sqlDB.Close()
+	return config.MigrateDB(db)
+}
+
 func main() {
 	godotenv.Load()
+
+	command, err := parseRuntimeCommand(os.Args[1:])
+	if err != nil {
+		log.Fatalf("❌ Perintah runtime tidak valid: %v", err)
+	}
+	if command == runtimeCommandMigrate {
+		if err := runDatabaseMigration(); err != nil {
+			log.Fatalf("❌ Migrasi database eksplisit gagal: %v", err)
+		}
+		return
+	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
-	db := config.ConnectDB()
+	db, err := config.OpenDB(os.Getenv("DB_DSN"))
+	if err != nil {
+		log.Fatalf("❌ Gagal koneksi ke database: %v", err)
+	}
+	sqlDB, err := db.DB()
+	if err != nil {
+		log.Fatalf("❌ Gagal mendapatkan pool koneksi database: %v", err)
+	}
+	if err := config.ValidateDBSchema(db); err != nil {
+		_ = sqlDB.Close()
+		log.Fatalf("❌ Schema database belum siap; jalankan perintah gateway-app migrate secara terpisah: %v", err)
+	}
+	defer sqlDB.Close()
+	log.Println("✅ Koneksi dan schema database siap; startup tidak menjalankan migrasi.")
 	recoveryCutoff, cutoffErr := config.LoadRecoveryCutoff()
 	if cutoffErr != nil {
 		log.Fatalf("❌ Konfigurasi recovery scope tidak valid: %v", cutoffErr)

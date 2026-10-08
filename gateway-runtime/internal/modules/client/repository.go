@@ -125,15 +125,6 @@ func (r *clientRepository) CountUsers() (int64, error) {
 }
 
 func (r *clientRepository) CreateUser(user *models.User) error {
-	err := r.db.Create(user).Error
-	if err == nil || user.ClientID != nil {
-		return err
-	}
-
-	if alterErr := r.db.Exec("ALTER TABLE users ALTER COLUMN client_id DROP NOT NULL").Error; alterErr != nil {
-		return err
-	}
-
 	return r.db.Create(user).Error
 }
 

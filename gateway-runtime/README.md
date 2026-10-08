@@ -86,6 +86,11 @@ Sistem menggunakan tiga skema kredensial yang independen satu sama lain:
 
 ## 🚀 Instalasi & Konfigurasi
 
+Pengelolaan schema PostgreSQL dipisahkan dari startup service. Runtime hanya
+memeriksa schema secara read-only; migrasi dijalankan secara eksplisit dengan
+perintah operator. Lihat [panduan migrasi database](docs/DATABASE_MIGRATION.md)
+sebelum melakukan perubahan schema/data.
+
 ### Prasyarat
 - Go 1.25+
 - PostgreSQL
