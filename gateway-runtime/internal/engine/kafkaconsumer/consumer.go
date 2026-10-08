@@ -2,9 +2,11 @@ package kafkaconsumer
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -38,6 +40,10 @@ type clientMapping struct {
 
 type Engine struct {
 	DB *gorm.DB
+	// StartOffset is explicitly configured as "earliest" or "latest" before
+	// consumers are allowed to start. It only applies when Kafka has no saved
+	// offset for this consumer group/partition.
+	StartOffset string
 
 	// SnapshotBuilder is nil while the feature flag is disabled. Once enabled,
 	// the builder creates an encrypted outbox payload before the database
@@ -90,6 +96,40 @@ func (e *Engine) resolveSourceSystem(cfg models.ClientKafkaConfig) string {
 
 func configFingerprint(cfg models.ClientKafkaConfig) string {
 	return cfg.TopicPrefix + "|" + cfg.KafkaBrokers + "|" + cfg.ActorField + "|" + cfg.PKField
+}
+
+func parseKafkaStartOffset(value string) (int64, error) {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "earliest":
+		return kafka.FirstOffset, nil
+	case "latest":
+		return kafka.LastOffset, nil
+	default:
+		return 0, fmt.Errorf("KAFKA_CONSUMER_START_OFFSET harus eksplisit bernilai earliest atau latest")
+	}
+}
+
+func kafkaMessageLogID(clientID string, msg kafka.Message) string {
+	identity := fmt.Sprintf("%s\x00%s\x00%d\x00%d\x00%x", clientID, msg.Topic, msg.Partition, msg.Offset, sha256.Sum256(msg.Value))
+	sum := sha256.Sum256([]byte(identity))
+	return "kafka-" + hex.EncodeToString(sum[:])
+}
+
+type kafkaMessageCommitter interface {
+	CommitMessages(context.Context, ...kafka.Message) error
+}
+
+// processAndCommit provides at-least-once delivery: a message is committed
+// only after its database transaction succeeds. If the commit result is
+// uncertain, the stable Kafka-derived log ID makes replay safe.
+func processAndCommit(ctx context.Context, committer kafkaMessageCommitter, msg kafka.Message, process func(kafka.Message) error) error {
+	if err := process(msg); err != nil {
+		return fmt.Errorf("process Kafka message %s[%d] offset %d: %w", msg.Topic, msg.Partition, msg.Offset, err)
+	}
+	if err := committer.CommitMessages(ctx, msg); err != nil {
+		return fmt.Errorf("commit Kafka message %s[%d] offset %d: %w", msg.Topic, msg.Partition, msg.Offset, err)
+	}
+	return nil
 }
 
 // StartConsumers memulai consumer untuk semua klien yang punya ClientKafkaConfig aktif
@@ -165,6 +205,10 @@ func (e *Engine) startClientConsumer(ctx context.Context, cfg models.ClientKafka
 
 // discoverAndConsume discover topic lalu consume
 func (e *Engine) discoverAndConsume(ctx context.Context, cfg models.ClientKafkaConfig) error {
+	startOffset, err := parseKafkaStartOffset(e.StartOffset)
+	if err != nil {
+		return err
+	}
 	dialer := getDialer(cfg)
 	conn, err := dialer.DialContext(ctx, "tcp", cfg.KafkaBrokers)
 	if err != nil {
@@ -213,13 +257,15 @@ func (e *Engine) discoverAndConsume(ctx context.Context, cfg models.ClientKafkaC
 	log.Printf("📋 [KafkaConsumer] klien=%s ditemukan %d topic: %v", cfg.ClientID, len(topics), topics)
 
 	reader := kafka.NewReader(kafka.ReaderConfig{
-		Brokers:        []string{cfg.KafkaBrokers},
-		GroupID:        fmt.Sprintf("auditchain-gateway-%s", cfg.ClientID),
-		GroupTopics:    topics,
-		MinBytes:       1,
-		MaxBytes:       10e6,
-		CommitInterval: time.Second,
-		StartOffset:    kafka.FirstOffset,
+		Brokers:     []string{cfg.KafkaBrokers},
+		GroupID:     fmt.Sprintf("auditchain-gateway-%s", cfg.ClientID),
+		GroupTopics: topics,
+		MinBytes:    1,
+		MaxBytes:    10e6,
+		// Zero means CommitMessages waits for the broker response instead of
+		// queueing an asynchronous commit whose failure may be observed later.
+		CommitInterval: 0,
+		StartOffset:    startOffset,
 		Dialer:         dialer,
 	})
 	defer reader.Close()
@@ -259,13 +305,12 @@ func (e *Engine) discoverAndConsume(ctx context.Context, cfg models.ClientKafkaC
 				continue
 			}
 
-			if err := e.processMessage(msg, cfg); err != nil {
-				log.Printf("⚠️  [KafkaConsumer] Gagal proses message topic=%s offset=%d: %v",
-					msg.Topic, msg.Offset, err)
-			}
-
-			if err := reader.CommitMessages(ctx, msg); err != nil {
-				log.Printf("⚠️  [KafkaConsumer] Gagal commit offset: %v", err)
+			if err := processAndCommit(ctx, reader, msg, func(message kafka.Message) error {
+				return e.processMessage(message, cfg)
+			}); err != nil {
+				// Stop this reader. Retrying a later offset in the same partition
+				// could commit past a message that was not durably processed.
+				return err
 			}
 		}
 	}
@@ -306,14 +351,25 @@ func (e *Engine) processMessage(msg kafka.Message, cfg models.ClientKafkaConfig)
 		return nil
 	}
 
-	var rawMap map[string]interface{}
-	if err := json.Unmarshal(msg.Value, &rawMap); err != nil {
-		log.Printf("⚠️  [KafkaConsumer] Gagal decode JSON: %v", err)
+	logID := kafkaMessageLogID(cfg.ClientID, msg)
+	var existing models.AuditLog
+	lookupErr := e.DB.Select("log_id").Where("log_id = ?", logID).First(&existing).Error
+	if lookupErr == nil {
+		// The DB transaction committed but Kafka's offset commit may not have;
+		// treating this replay as success lets the consumer safely commit it.
 		return nil
 	}
+	if !errors.Is(lookupErr, gorm.ErrRecordNotFound) {
+		return fmt.Errorf("gagal memeriksa replay Kafka: %w", lookupErr)
+	}
 
-	// DEBUG: Tampilkan payload raw jika dibutuhkan
-	log.Printf("🔍 [KafkaConsumer DEBUG] Topik: %s | Menerima payload: %v", msg.Topic, string(msg.Value))
+	var rawMap map[string]interface{}
+	if err := json.Unmarshal(msg.Value, &rawMap); err != nil {
+		return fmt.Errorf("payload CDC bukan JSON valid: %w", err)
+	}
+	if rawMap == nil {
+		return fmt.Errorf("payload CDC harus berupa object JSON")
+	}
 
 	var payload DebeziumOracleMessage
 	if innerPayload, exists := rawMap["payload"]; exists {
@@ -349,7 +405,7 @@ func (e *Engine) processMessage(msg kafka.Message, cfg models.ClientKafkaConfig)
 		}
 	}
 	if tableName == "" {
-		return nil
+		return fmt.Errorf("nama tabel tidak ditemukan pada payload atau topic")
 	}
 
 	var agentCfg models.AgentConfig
@@ -379,7 +435,6 @@ func (e *Engine) processMessage(msg kafka.Message, cfg models.ClientKafkaConfig)
 
 	// Untuk tabel user, kita WAJIB memproses operasi "r" (snapshot read)
 	// agar memori identitas Gateway terisi dengan user yang sudah ada.
-	log.Printf("🔎 [DEBUG] tableName=%s, agentCfg.UserTableName=%s, isUserTable=%v", tableName, agentCfg.UserTableName, isUserTable)
 	if isUserTable {
 		e.processClientUserCDC(payload, cfg, tableName, agentCfg)
 	}
@@ -468,7 +523,6 @@ func (e *Engine) processMessage(msg kafka.Message, cfg models.ClientKafkaConfig)
 					if resolved != "" {
 						actor = resolved
 						actorFound = true
-						log.Printf("🔍 [KafkaConsumer] DELETE actor resolved dari 'before' state: field=%s, actor=%s", field, actor)
 						break
 					}
 				}
@@ -484,7 +538,6 @@ func (e *Engine) processMessage(msg kafka.Message, cfg models.ClientKafkaConfig)
 			).Order("timestamp DESC").First(&lastLog).Error; err == nil && lastLog.Actor != "" {
 				actor = lastLog.Actor
 				actorFound = true
-				log.Printf("🔍 [KafkaConsumer] DELETE actor resolved dari histori audit log: actor=%s, resource=%s", actor, resource)
 			}
 		}
 	}
@@ -496,13 +549,9 @@ func (e *Engine) processMessage(msg kafka.Message, cfg models.ClientKafkaConfig)
 	// Resolusi CUID/UUID → Nama Manusia
 	// Jika actor terlihat seperti ID acak (Prisma CUID, UUID, dll),
 	// coba cari nama aslinya di tabel client_users
-	log.Printf("🔎 [DEBUG] Actor SEBELUM resolve: '%s', looksLikeID=%v, table=%s", actor, looksLikeGeneratedID(actor), tableName)
 	if actor != "" && actor != "Unknown" && looksLikeGeneratedID(actor) {
 		if resolved := e.resolveActorName(cfg.ClientID, actor); resolved != "" {
-			log.Printf("✅ [DEBUG] Actor RESOLVED: '%s' → '%s'", actor, resolved)
 			actor = resolved
-		} else {
-			log.Printf("❌ [DEBUG] Actor TIDAK BISA di-resolve: '%s' — client_users kosong atau tidak ditemukan", actor)
 		}
 	}
 
@@ -518,21 +567,12 @@ func (e *Engine) processMessage(msg kafka.Message, cfg models.ClientKafkaConfig)
 	metaBytes, _ := json.Marshal(metadata)
 	canonicalMeta := string(metaBytes) // ← tidak perlu unmarshal+marshal ulang
 
-	// Cek duplikasi
-	var existing models.AuditLog
-	if err := e.DB.Where(
-		"resource = ? AND timestamp = ? AND client_id = ?",
-		resource, timestamp, cfg.ClientID,
-	).First(&existing).Error; err == nil {
-		return nil
-	}
-
 	// source_system = Client.CompanyName (diadopsi dari branch testing),
 	// fallback ke cfg.SourceSystem jika company_name klien belum diisi.
 	sourceSystem := e.resolveSourceSystem(cfg)
 
 	auditLog := &models.AuditLog{
-		LogID:        generateLogID(),
+		LogID:        logID,
 		ClientID:     cfg.ClientID,
 		Actor:        actor,
 		Action:       action,
@@ -868,10 +908,6 @@ func normalizeFieldValue(key string, val interface{}) interface{} {
 	}
 }
 
-func generateLogID() string {
-	return fmt.Sprintf("%d", time.Now().UnixNano())
-}
-
 // generateLogHash — format string HARUS identik dengan hasher.GenerateLogHash
 // Normalisasi AuthorizationContext: "null"/"<nil>"/"" → selalu ""
 type mapResolver struct {
@@ -1005,7 +1041,6 @@ func (e *Engine) processClientUserCDC(payload DebeziumOracleMessage, cfg models.
 			LastSeenAt:  time.Now(),
 		}
 		e.DB.Create(&newUser)
-		log.Printf("👤 [KafkaConsumer] User baru disimpan: id=%s name=%s email=%s", lookupKey, fullName, email)
 	} else {
 		// Update
 		updates := map[string]interface{}{
@@ -1074,26 +1109,19 @@ func (e *Engine) resolveActorName(clientID, actorID string) string {
 	var user models.ClientUser
 	result := e.DB.Where("client_id = ? AND user_id = ?", clientID, actorID).Limit(1).Find(&user)
 	if result.Error != nil {
-		log.Printf("⚠️  [KafkaConsumer] Gagal mencari actor '%s' di client_users: %v", actorID, result.Error)
+		log.Printf("⚠️  [KafkaConsumer] Gagal mencari actor di client_users: %v", result.Error)
 		return ""
 	}
 	if result.RowsAffected == 0 {
 		// Fallback: coba cari di raw_data (mungkin ID disimpan dengan key berbeda)
-		log.Printf("🔎 [DEBUG] resolveActorName: tidak ditemukan di user_id='%s', coba cari di raw_data...", actorID)
 		fallbackResult := e.DB.Where("client_id = ? AND CAST(raw_data AS TEXT) LIKE ?", clientID, "%"+actorID+"%").Limit(1).Find(&user)
 		if fallbackResult.Error != nil {
-			log.Printf("⚠️  [KafkaConsumer] Gagal fallback actor '%s' di raw_data: %v", actorID, fallbackResult.Error)
+			log.Printf("⚠️  [KafkaConsumer] Gagal fallback pencarian actor di raw_data: %v", fallbackResult.Error)
 			return ""
 		}
 		if fallbackResult.RowsAffected == 0 {
-			log.Printf("❌ [DEBUG] resolveActorName: GAGAL TOTAL untuk actorID='%s'. Tidak ada data di client_users.", actorID)
-			// Hitung total rows di client_users untuk debugging
-			var count int64
-			e.DB.Model(&models.ClientUser{}).Where("client_id = ?", clientID).Count(&count)
-			log.Printf("📊 [DEBUG] Total client_users untuk client '%s': %d", clientID, count)
 			return ""
 		}
-		log.Printf("✅ [DEBUG] resolveActorName: DITEMUKAN via raw_data fallback untuk actorID='%s'", actorID)
 	}
 
 	// Prioritas: Email > FullName > Username
@@ -1105,9 +1133,5 @@ func (e *Engine) resolveActorName(clientID, actorID string) string {
 	}
 
 	e.actorCache.Store(cacheKey, resolved)
-
-	if resolved != "" {
-		log.Printf("🔍 [KafkaConsumer] Resolved actor: %s → %s", actorID, resolved)
-	}
 	return resolved
 }

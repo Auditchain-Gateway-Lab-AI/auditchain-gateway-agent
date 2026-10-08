@@ -130,6 +130,10 @@ FABRIC_CHANNEL=audit-channel
 FABRIC_CHAINCODE=audit-contract
 
 APP_ENV=local
+GATEWAY_BACKGROUND_WORKERS_ENABLED=false
+# Wajib dipilih eksplisit sebelum workers diaktifkan; berlaku hanya jika
+# Kafka consumer group/partition belum memiliki committed offset.
+KAFKA_CONSUMER_START_OFFSET=earliest
 VERIFICATION_JOB_BATCH_SIZE=100
 VERIFICATION_SCHEDULER_ENABLED=false
 VERIFICATION_SCHEDULER_CLIENT_ID=
@@ -179,15 +183,86 @@ go run main.go
 Aplikasi berjalan di `http://localhost:8080` (atau sesuai `PORT`).
 Swagger UI tersedia di `http://localhost:8080/swagger/index.html`.
 
-Worker background verification berjalan bersama proses Gateway. Gateway Dashboard
-atau scheduler dapat membuat job melalui `POST /api/dashboard/verification-runs`;
-worker memproses range dalam batch dengan ukuran default `100` dari
+### Menjalankan sebagai service terpisah di Mini PC
+
+`gateway-runtime/docker-compose.yml` adalah Compose terpisah dari Compose
+Agent di root repository. Menjalankannya tidak membangun ulang atau
+menghentikan `auditchain-agent` pada port `9090`.
+
+Di Mini PC:
+
+```bash
+cd ~/auditchain/auditchain-gateway-agent/gateway-runtime
+cp .env.example .env
+chmod 600 .env
+```
+
+Edit `.env` sebelum menjalankan service: isi DSN PostgreSQL Gateway (bukan DSN
+read-only connectivity-check), alamat Tailscale Besu, secret JWT, origin
+dashboard, serta parameter Fabric. Pastikan direktori `FABRIC_MATERIAL_DIR`
+berisi `ca.crt`, `probe-cert.pem`, dan `probe-key.pem`; private key hanya
+dipasang read-only ke container dan jangan pernah di-commit.
+
+Preflight bawaan mengikat port ke `127.0.0.1:8080` dan
+`GATEWAY_BACKGROUND_WORKERS_ENABLED=false`. API dapat diuji lokal, tetapi
+Kafka/anchoring/pipeline otomatis belum memproses log. Ini juga bukan mode
+read-only penuh: endpoint API yang dipanggil secara eksplisit masih dapat
+melakukan operasi bisnis. `/readyz` hanya membuktikan kesiapan koneksi/schema
+PostgreSQL, bukan end-to-end Fabric atau Kafka.
+
+Validasi dan mulai hanya service Gateway runtime:
+
+```bash
+docker-compose config
+docker-compose up -d --build
+docker-compose ps
+docker-compose logs --tail=100 gateway-runtime
+curl -fsS http://127.0.0.1:8080/readyz
+```
+
+Jangan jalankan `docker-compose down -v`; service ini tidak memiliki volume
+database sendiri dan PostgreSQL/Fabric tetap berada di Besu. Selama preflight,
+jangan aktifkan background workers. Untuk cutover CDC, pastikan consumer Gateway
+di Besu sudah dihentikan, periksa offset consumer group yang sama, lalu baru
+aktifkan `GATEWAY_BACKGROUND_WORKERS_ENABLED=true` dan pilih
+`KAFKA_CONSUMER_START_OFFSET=earliest` atau `latest` secara sadar. `earliest`
+atau `latest` hanya berlaku jika group belum memiliki offset tersimpan. Jangan
+jalankan dua deployment Gateway sebagai consumer produksi bersamaan.
+
+Port hanya dipublikasikan ke localhost secara default. Akses dari dashboard
+jarak jauh memerlukan keputusan jaringan/firewall tersendiri; jangan mengubah
+bind address menjadi `0.0.0.0` tanpa membatasi akses ke jaringan privat.
+
+Background worker otomatis fail-closed: default
+`GATEWAY_BACKGROUND_WORKERS_ENABLED=false` menjaga Kafka consumer, hashing,
+aggregator, Fabric anchoring, snapshot worker, verification worker/scheduler,
+dan tamper scanner agar tidak berjalan saat service baru dinyalakan. API HTTP
+tetap tersedia dan endpoint yang dipanggil eksplisit tetap dapat melakukan
+operasi bisnis; flag ini bukan mode read-only untuk seluruh aplikasi.
+
+Sebelum mengaktifkan worker, tetapkan
+`GATEWAY_BACKGROUND_WORKERS_ENABLED=true` dan pilih
+`KAFKA_CONSUMER_START_OFFSET=earliest` atau `latest`. Nilai itu hanya menjadi
+fallback ketika Kafka belum menyimpan offset untuk group/partition tersebut;
+offset tersimpan pada group `auditchain-gateway-<client_id>` tetap menjadi
+checkpoint yang dipakai. `latest` dapat melewati pesan lama jika group belum
+memiliki checkpoint. Saat cutover ke mini PC, hentikan consumer Gateway lama
+terlebih dahulu dan jangan menjalankan dua deployment consumer untuk tenant
+yang sama secara bersamaan.
+
+Saat background workers diaktifkan, worker verification memproses job yang
+dibuat Gateway Dashboard atau scheduler melalui
+`POST /api/dashboard/verification-runs`, dalam batch default `100` dari
 `VERIFICATION_JOB_BATCH_SIZE`. Nilai tersebut adalah ukuran batch, bukan batas
 jumlah log dalam satu range. Client Portal hanya membaca progress dan hasil
 terakhir melalui `GET /api/dashboard/verification-runs/latest`.
+Worker job ini juga hanya memproses antrean otomatis saat
+`GATEWAY_BACKGROUND_WORKERS_ENABLED=true`.
 
-Scheduler backend bersifat opt-in melalui `VERIFICATION_SCHEDULER_ENABLED`.
-Ketika aktif, scheduler mengambil client berstatus `active`, melanjutkan dari
+Scheduler backend hanya berjalan jika
+`GATEWAY_BACKGROUND_WORKERS_ENABLED=true` dan
+`VERIFICATION_SCHEDULER_ENABLED=true`. Ketika keduanya aktif, scheduler
+mengambil client berstatus `active`, melanjutkan dari
 range completed terakhir dengan overlap kecil, lalu membuat satu
 `verification_run` durable per client. Scheduler tetap berjalan tanpa browser
 dashboard terbuka. `VERIFICATION_SCHEDULER_RUN_ON_START` hanya dipakai untuk
@@ -196,11 +271,18 @@ Untuk smoke test satu tenant, isi `VERIFICATION_SCHEDULER_CLIENT_ID` dengan
 UUID client tersebut. Jika kosong, semua client berstatus `active` akan diproses.
 
 Tamper Scanner adalah jalur otomatis terpisah dari scheduler dan Verify Range.
-Scanner hanya dimulai saat `TAMPER_SCANNER_ENABLED=true`; interval default-nya
-300 detik dan batch default-nya 100 log. Scanner memeriksa hash lokal, Merkle
-proof, dan anchor Fabric, lalu menyimpan hasil ke `audit_logs` tanpa tombol
-dashboard. Status scheduler dan scanner di server tetap harus dikonfirmasi dari
-environment serta log startup runtime.
+Scanner hanya dimulai jika `GATEWAY_BACKGROUND_WORKERS_ENABLED=true` dan
+`TAMPER_SCANNER_ENABLED=true`; interval default-nya 300 detik dan batch
+default-nya 100 log. Scanner memeriksa hash lokal, Merkle proof, dan anchor
+Fabric, lalu menyimpan hasil ke `audit_logs` tanpa tombol dashboard. Status
+scheduler dan scanner di server tetap harus dikonfirmasi dari environment serta
+log startup runtime.
+
+Consumer tidak meng-commit offset bila pemrosesan atau transaksi DB gagal;
+reader dihentikan dan mencoba ulang dari pesan yang sama. Karena tidak ada DLQ
+otomatis, payload poison harus diperiksa/diperbaiki sebelum consumer dapat maju
+pada partition tersebut. Log consumer hanya memuat identitas topic/partition/
+offset dan error ringkas, bukan isi payload CDC.
 Ringkasan pemeriksaan terakhir tersedia di `data.integrity_check` pada
 `GET /api/dashboard/stats`; data row per log tetap berada di endpoint Gateway.
 

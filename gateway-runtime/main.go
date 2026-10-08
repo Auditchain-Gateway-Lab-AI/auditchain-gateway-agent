@@ -60,6 +60,29 @@ func tamperScannerEnabled() bool {
 	return strings.EqualFold(strings.TrimSpace(os.Getenv("TAMPER_SCANNER_ENABLED")), "true")
 }
 
+func loadBackgroundWorkersConfig() (bool, string, error) {
+	enabled := false
+	rawEnabled := strings.TrimSpace(os.Getenv("GATEWAY_BACKGROUND_WORKERS_ENABLED"))
+	if rawEnabled != "" {
+		switch strings.ToLower(rawEnabled) {
+		case "true":
+			enabled = true
+		case "false":
+		default:
+			return false, "", fmt.Errorf("GATEWAY_BACKGROUND_WORKERS_ENABLED harus berupa true atau false")
+		}
+	}
+	if !enabled {
+		return false, "", nil
+	}
+
+	startOffset := strings.ToLower(strings.TrimSpace(os.Getenv("KAFKA_CONSUMER_START_OFFSET")))
+	if startOffset != "earliest" && startOffset != "latest" {
+		return false, "", fmt.Errorf("saat background workers aktif, KAFKA_CONSUMER_START_OFFSET wajib earliest atau latest")
+	}
+	return true, startOffset, nil
+}
+
 func configuredRecoveryMode() string {
 	mode := strings.ToLower(strings.TrimSpace(os.Getenv("RECOVERY_MODE")))
 	if mode == "" {
@@ -263,10 +286,14 @@ func loadVerificationSchedulerConfig() (audit.VerificationSchedulerConfig, error
 	}, nil
 }
 
-func startPipelineWorker(ctx context.Context, db *gorm.DB, fabricSvc *blockchain.FabricService, snapshotBuilder snapshotstore.OutboxBuilder, recoveryCutoff *time.Time, recoveryService *recovery.Service, snapshotRequired bool) {
+func startPipelineWorker(ctx context.Context, db *gorm.DB, fabricSvc *blockchain.FabricService, snapshotBuilder snapshotstore.OutboxBuilder, recoveryCutoff *time.Time, recoveryService *recovery.Service, snapshotRequired bool, kafkaStartOffset string) {
 	hashEngine := &hasher.Engine{DB: db}
 	aggEngine := &aggregator.Engine{DB: db, RecoveryCutoff: recoveryCutoff, SnapshotRequired: &snapshotRequired}
-	kafkaEngine := &kafkaconsumer.Engine{DB: db, SnapshotBuilder: snapshotBuilder}
+	kafkaEngine := &kafkaconsumer.Engine{
+		DB:              db,
+		SnapshotBuilder: snapshotBuilder,
+		StartOffset:     kafkaStartOffset,
+	}
 
 	// Ticker pipeline: hasher + aggregator (batch=10) + anchoring setiap 10 detik
 	go func() {
@@ -377,6 +404,16 @@ func main() {
 		return
 	}
 
+	backgroundWorkersEnabled, kafkaStartOffset, workerConfigErr := loadBackgroundWorkersConfig()
+	if workerConfigErr != nil {
+		log.Fatalf("Konfigurasi background worker tidak valid: %v", workerConfigErr)
+	}
+	if backgroundWorkersEnabled {
+		log.Printf("Background workers aktif; Kafka start offset untuk group/partition tanpa checkpoint: %s", kafkaStartOffset)
+	} else {
+		log.Println("Background workers nonaktif; Kafka/pipeline/snapshot/verification/tamper workers otomatis tidak berjalan.")
+	}
+
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
@@ -414,7 +451,7 @@ func main() {
 	if effectiveSnapshotRequired && snapshotBuilder == nil {
 		log.Fatal("❌ SNAPSHOT_REQUIRED_FOR_ANCHOR=true membutuhkan SNAPSHOT_WRITER_ENABLED=true dan konfigurasi MinIO yang valid")
 	}
-	if snapshotStore != nil {
+	if backgroundWorkersEnabled && snapshotStore != nil {
 		snapshotWorkerConfig, configErr := loadSnapshotWorkerConfig()
 		if configErr != nil {
 			log.Fatalf("❌ Konfigurasi snapshot worker tidak valid: %v", configErr)
@@ -441,7 +478,7 @@ func main() {
 	if recoveryEnabled() && recoveryMode == "agent_direct" && fabricSvc == nil {
 		log.Fatal("❌ RECOVERY_MODE=agent_direct membutuhkan koneksi Fabric yang valid")
 	}
-	if tamperScannerEnabled() && fabricSvc == nil {
+	if backgroundWorkersEnabled && tamperScannerEnabled() && fabricSvc == nil {
 		log.Fatal("❌ TAMPER_SCANNER_ENABLED=true membutuhkan koneksi Fabric yang valid")
 	}
 
@@ -455,20 +492,24 @@ func main() {
 	agentService := agentverifier.NewService(db)
 	recoveryService.SetAgentVerifier(agentService)
 
-	startPipelineWorker(ctx, db, fabricSvc, snapshotBuilder, recoveryCutoff, recoveryService, effectiveSnapshotRequired)
+	if backgroundWorkersEnabled {
+		startPipelineWorker(ctx, db, fabricSvc, snapshotBuilder, recoveryCutoff, recoveryService, effectiveSnapshotRequired, kafkaStartOffset)
+	}
 
 	auditRepo := audit.NewAuditRepository(db)
 	auditService := audit.NewService(auditRepo, fabricSvc, db)
 	verificationJobs := audit.NewVerificationJobService(db, auditService)
-	go verificationJobs.Run(ctx)
-	verificationSchedulerConfig, schedulerConfigErr := loadVerificationSchedulerConfig()
-	if schedulerConfigErr != nil {
-		log.Fatalf("âŒ Konfigurasi verification scheduler tidak valid: %v", schedulerConfigErr)
+	if backgroundWorkersEnabled {
+		go verificationJobs.Run(ctx)
+		verificationSchedulerConfig, schedulerConfigErr := loadVerificationSchedulerConfig()
+		if schedulerConfigErr != nil {
+			log.Fatalf("Konfigurasi verification scheduler tidak valid: %v", schedulerConfigErr)
+		}
+		verificationScheduler := audit.NewVerificationScheduler(db, verificationJobs, verificationSchedulerConfig)
+		go verificationScheduler.Run(ctx)
 	}
-	verificationScheduler := audit.NewVerificationScheduler(db, verificationJobs, verificationSchedulerConfig)
-	go verificationScheduler.Run(ctx)
 	auditHandler := audit.NewHandlerWithVerificationJobs(auditService, verificationJobs)
-	if tamperScannerEnabled() {
+	if backgroundWorkersEnabled && tamperScannerEnabled() {
 		scannerConfig, configErr := loadTamperScannerConfig(recoveryCutoff)
 		if configErr != nil {
 			log.Fatalf("❌ Konfigurasi tamper scanner tidak valid: %v", configErr)

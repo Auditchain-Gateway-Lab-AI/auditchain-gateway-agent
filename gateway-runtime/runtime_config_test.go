@@ -84,3 +84,54 @@ func TestDirectRecoveryIgnoresLegacySnapshotWriterFlag(t *testing.T) {
 		t.Fatal("agent_direct initialized legacy snapshot runtime")
 	}
 }
+
+func TestLoadBackgroundWorkersConfigDefaultsToDisabled(t *testing.T) {
+	t.Setenv("GATEWAY_BACKGROUND_WORKERS_ENABLED", "")
+	t.Setenv("KAFKA_CONSUMER_START_OFFSET", "")
+	enabled, offset, err := loadBackgroundWorkersConfig()
+	if err != nil {
+		t.Fatalf("loadBackgroundWorkersConfig() error = %v", err)
+	}
+	if enabled || offset != "" {
+		t.Fatalf("got enabled=%v offset=%q, want disabled with no offset", enabled, offset)
+	}
+}
+
+func TestLoadBackgroundWorkersConfigRequiresExplicitKafkaOffset(t *testing.T) {
+	t.Setenv("GATEWAY_BACKGROUND_WORKERS_ENABLED", "true")
+	t.Setenv("KAFKA_CONSUMER_START_OFFSET", "")
+	if _, _, err := loadBackgroundWorkersConfig(); err == nil {
+		t.Fatal("enabled background workers accepted an unspecified Kafka start offset")
+	}
+}
+
+func TestLoadBackgroundWorkersConfigRejectsInvalidValues(t *testing.T) {
+	for _, value := range []string{"sometimes", "1", "yes"} {
+		t.Setenv("GATEWAY_BACKGROUND_WORKERS_ENABLED", value)
+		if _, _, err := loadBackgroundWorkersConfig(); err == nil {
+			t.Fatalf("invalid worker enable flag %q was accepted", value)
+		}
+	}
+
+	t.Setenv("GATEWAY_BACKGROUND_WORKERS_ENABLED", "true")
+	t.Setenv("KAFKA_CONSUMER_START_OFFSET", "0")
+	if _, _, err := loadBackgroundWorkersConfig(); err == nil {
+		t.Fatal("numeric Kafka offset was accepted instead of explicit earliest/latest")
+	}
+}
+
+func TestLoadBackgroundWorkersConfigAcceptsExplicitOffset(t *testing.T) {
+	t.Setenv("GATEWAY_BACKGROUND_WORKERS_ENABLED", "true")
+	for _, offset := range []string{"earliest", "latest"} {
+		t.Run(offset, func(t *testing.T) {
+			t.Setenv("KAFKA_CONSUMER_START_OFFSET", offset)
+			enabled, gotOffset, err := loadBackgroundWorkersConfig()
+			if err != nil {
+				t.Fatalf("loadBackgroundWorkersConfig() error = %v", err)
+			}
+			if !enabled || gotOffset != offset {
+				t.Fatalf("got enabled=%v offset=%q, want enabled and %q", enabled, gotOffset, offset)
+			}
+		})
+	}
+}
