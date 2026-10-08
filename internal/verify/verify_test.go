@@ -1,6 +1,8 @@
 package verify
 
 import (
+	"database/sql"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -140,6 +142,53 @@ func TestHandleVerify_DatabaseFailureIsNotFoundFalse(t *testing.T) {
 	}
 	if rr.Body.String() == "{\"found\":false}" {
 		t.Fatal("database failure must not be reported as a missing row")
+	}
+}
+
+func TestHandleVerifyAuditRequiresReadToken(t *testing.T) {
+	server := NewServer(nil, "secret-token", "9090")
+	request := httptest.NewRequest(http.MethodGet, "/verify-audit/620", nil)
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("expected unauthorized, got %d", response.Code)
+	}
+}
+
+func TestSetAuditTrailProjectionNormalizesOracleNames(t *testing.T) {
+	server := NewServer(nil, "secret-token", "9090")
+	server.SetAuditTrailProjection(AuditTrailProjection{Schema: " simrs ", Table: " audit_trail "})
+	if server.auditTrailProjection.Schema != "SIMRS" || server.auditTrailProjection.Table != "AUDIT_TRAIL" {
+		t.Fatalf("projection = %+v, want uppercase Oracle identifiers", server.auditTrailProjection)
+	}
+}
+
+func TestHandleVerifyAuditValidatesRecordIDAndReportsDatabaseUnavailable(t *testing.T) {
+	server := NewServer(nil, "secret-token", "9090")
+	badPath := httptest.NewRequest(http.MethodGet, "/verify-audit/", nil)
+	badPath.Header.Set("Authorization", "Bearer secret-token")
+	badResponse := httptest.NewRecorder()
+	server.Handler().ServeHTTP(badResponse, badPath)
+	if badResponse.Code != http.StatusBadRequest {
+		t.Fatalf("expected bad request for empty source ID, got %d", badResponse.Code)
+	}
+
+	request := httptest.NewRequest(http.MethodGet, "/verify-audit/620", nil)
+	request.Header.Set("Authorization", "Bearer secret-token")
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected database unavailable, got %d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestDecodeAuditImage(t *testing.T) {
+	image, err := decodeAuditImage(sql.NullString{String: `{"ID":620,"nama":"ruangan"}`, Valid: true})
+	if err != nil {
+		t.Fatalf("decodeAuditImage() error = %v", err)
+	}
+	if image["ID"].(json.Number).String() != "620" || image["nama"] != "ruangan" {
+		t.Fatalf("decoded image = %#v", image)
 	}
 }
 

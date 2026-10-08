@@ -143,6 +143,8 @@ DB_NAME=ORCLCDB             # SID Oracle Database
 # Token Autentikasi Keamanan (Harus sama dengan config di Gateway)
 AGENT_VERIFY_TOKEN=replace-with-a-long-read-token
 AGENT_VERIFY_PORT=9090
+AGENT_AUDIT_TRAIL_SCHEMA=  # optional Oracle owner/schema
+AGENT_AUDIT_TRAIL_TABLE=AUDIT_TRAIL
 
 # Recovery aman secara default: tetap false sampai pilot disetujui.
 AGENT_RECOVERY_ENABLED=false

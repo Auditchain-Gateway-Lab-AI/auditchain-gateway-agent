@@ -24,6 +24,12 @@ Agent tidak mengirim callback final recovery ke Gateway.
 - `AGENT_RECOVERY_TOKEN`, `AGENT_CLIENT_ID`, dan policy lokal hanya bila
   recovery pilot diaktifkan
 
+Gateway juga menggunakan read-only `GET /verify-audit/:audit_trail_id` untuk
+membaca event asli dari tabel historis client (default `AUDIT_TRAIL`). Endpoint
+ini terpisah dari `GET /verify/:table/:id`, yang membaca row operasional saat
+ini. Gateway dapat memakai event historis tersebut untuk memperbaiki metadata
+audit log tanpa MinIO setelah hash, Merkle proof, dan Fabric anchor cocok.
+
 ## Konfigurasi
 
 Salin dan sesuaikan `config.yml` serta environment. `config.yml` hanya
