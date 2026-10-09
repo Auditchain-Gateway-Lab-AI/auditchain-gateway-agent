@@ -126,7 +126,7 @@ FABRIC_PEER_ENDPOINT=localhost:7051
 FABRIC_TLS_CERT_PATH=./crypto-config/tls/ca.crt
 FABRIC_CERT_PATH=./crypto-config/users/Admin@org1/msp/signcerts/cert.pem
 FABRIC_KEY_PATH=./crypto-config/users/Admin@org1/msp/keystore/priv_key.pem
-FABRIC_CHANNEL=audit-channel
+FABRIC_CHANNEL=auditchannel
 FABRIC_CHAINCODE=audit-contract
 
 APP_ENV=local
