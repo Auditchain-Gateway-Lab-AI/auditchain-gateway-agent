@@ -90,6 +90,7 @@ type VerifyLogData struct {
 	DBRoot             string      `json:"merkle_root,omitempty"`
 	ChainRoot          string      `json:"blockchain_tx_id,omitempty"`
 	AgentStatus        string      `json:"agent_status,omitempty"`
+	AgentMessage       string      `json:"agent_message,omitempty"`
 	SourceStatus       string      `json:"source_status,omitempty"`
 	AgentDiscrepancies interface{} `json:"agent_discrepancies,omitempty"`
 }
@@ -268,6 +269,9 @@ func (h *Handler) VerifyLog(c *gin.Context) {
 				"is_valid":        result.IsValid,
 				"log_id":          result.LogID,
 				"message":         result.Message,
+				"agent_status":    result.AgentStatus,
+				"agent_message":   result.AgentMessage,
+				"source_status":   result.SourceStatus,
 				"incident_id":     result.IncidentID,
 				"incident_scope":  result.IncidentScope,
 				"incident_type":   result.IncidentType,
@@ -304,6 +308,7 @@ func (h *Handler) VerifyLog(c *gin.Context) {
 				"is_valid":            result.IsValid,
 				"message":             result.Message,
 				"agent_status":        result.AgentStatus,
+				"agent_message":       result.AgentMessage,
 				"agent_discrepancies": result.AgentDiscrepancies,
 				"source_status":       result.SourceStatus,
 				"incident_id":         result.IncidentID,

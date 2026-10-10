@@ -36,6 +36,7 @@ type VerificationResult struct {
 	IncidentStatus     string                      `json:"incident_status,omitempty"`
 	TxID               *string                     `json:"blockchain_tx_id,omitempty"`
 	AgentStatus        string                      `json:"agent_status,omitempty"`
+	AgentMessage       string                      `json:"agent_message,omitempty"`
 	SourceStatus       string                      `json:"source_status,omitempty"`
 	SourceStateHash    string                      `json:"-"`
 	AgentDiscrepancies []agentverifier.Discrepancy `json:"agent_discrepancies,omitempty"`
@@ -180,10 +181,14 @@ type ResourceLogVerification struct {
 	//   matched            — event client terbaru, Agent dihubungi, data cocok
 	//   mismatch           — event client terbaru, Agent dihubungi, ada perbedaan
 	//   unreachable        — event client terbaru, Agent gagal dihubungi
+	//   forbidden          — Agent merespons tetapi menolak akses verifikasi
+	//   unauthorized       — Agent menolak token verifikasi
+	//   http_error         — Agent merespons dengan status HTTP non-sukses lainnya
 	//   not_configured     — event client terbaru, klien belum setup AgentConfig
 	//   skipped_recovery   — event internal Gateway, tidak dibandingkan ke Agent
 	//   skipped_historical — event client lama, Layer 3 tidak relevan
 	AgentStatus        string                      `json:"agent_status"`
+	AgentMessage       string                      `json:"agent_message,omitempty"`
 	AgentDiscrepancies []agentverifier.Discrepancy `json:"agent_discrepancies,omitempty"`
 }
 
@@ -1016,6 +1021,7 @@ func (s *auditService) verifyLogIntegrity(logID, clientID, requestID string, ski
 	sourceStatus := ""
 	sourceStateHash := ""
 	var agentDiscrepancies []agentverifier.Discrepancy
+	var agentMessage string
 
 	if !skipAgent {
 		if isRecoveryAction(auditLog.Action) {
@@ -1030,12 +1036,8 @@ func (s *auditService) verifyLogIntegrity(logID, clientID, requestID string, ski
 				agentStarted := time.Now()
 				agentResult, agentErr := s.agent.VerifyAgainstAgent(auditLog)
 				logRangeTiming(requestID, "agent_verify", agentStarted, agentErr, "log_id", logID)
-				if agentErr != nil {
-					agentStatus = "unreachable"
-					sourceStatus = models.SourceStatusUnreachable
-				} else if agentResult == nil {
-					agentStatus = "unreachable"
-					sourceStatus = models.SourceStatusUnreachable
+				if agentErr != nil || agentResult == nil {
+					agentStatus, sourceStatus, agentMessage = classifyAgentVerificationFailure(agentErr)
 				} else if agentResult.AgentUsed {
 					if agentResult.IsMatch {
 						agentStatus = "matched"
@@ -1063,6 +1065,7 @@ func (s *auditService) verifyLogIntegrity(logID, clientID, requestID string, ski
 		DBRoot:             reconstructedRoot,
 		TxID:               auditLog.BlockchainTxID,
 		AgentStatus:        agentStatus,
+		AgentMessage:       agentMessage,
 		SourceStatus:       sourceStatus,
 		SourceStateHash:    sourceStateHash,
 		AgentDiscrepancies: agentDiscrepancies,
@@ -1104,12 +1107,15 @@ func (s *auditService) verifyClientLogIntegrity(logID, clientID, requestID strin
 	logRangeTiming(requestID, "agent_verify", agentStarted, agentErr, "log_id", logID)
 
 	if agentErr != nil || agentResult == nil {
+		agentStatus, sourceStatus, agentMessage := classifyAgentVerificationFailure(agentErr)
 		return &VerificationResult{
-			Status:      "failed_source",
-			Message:     "🚨 Gagal menghubungi Agent atau Agent belum dikonfigurasi.",
-			IsValid:     false,
-			LogID:       auditLog.LogID,
-			AgentStatus: "unreachable",
+			Status:       "failed_source",
+			Message:      agentMessage,
+			IsValid:      false,
+			LogID:        auditLog.LogID,
+			AgentStatus:  agentStatus,
+			AgentMessage: agentMessage,
+			SourceStatus: sourceStatus,
 		}, nil
 	}
 
@@ -1426,11 +1432,39 @@ func sourceStatusFromAgentStatus(status string) string {
 		return models.SourceStatusMismatch
 	case "unreachable":
 		return models.SourceStatusUnreachable
-	case "not_configured":
+	case "not_configured", "forbidden", "unauthorized", "http_error", "invalid_response":
 		return models.SourceStatusNotComparable
 	default:
 		return ""
 	}
+}
+
+// classifyAgentVerificationFailure keeps an Agent HTTP denial separate from a
+// transport failure. Gateway/Fabric integrity remains independent of this
+// client-source verification result.
+func classifyAgentVerificationFailure(err error) (agentStatus, sourceStatus, message string) {
+	if err == nil {
+		return "invalid_response", models.SourceStatusNotComparable,
+			"Agent tidak memberikan hasil verifikasi yang dapat dibaca."
+	}
+
+	var statusErr *agentverifier.HTTPStatusError
+	if errors.As(err, &statusErr) {
+		switch statusErr.StatusCode {
+		case 401:
+			return "unauthorized", models.SourceStatusNotComparable,
+				"Agent menolak token verifikasi (HTTP 401); periksa token baca yang dikonfigurasi."
+		case 403:
+			return "forbidden", models.SourceStatusNotComparable,
+				"Agent menolak permintaan verifikasi (HTTP 403); periksa izin tabel/policy dan token verifikasi."
+		default:
+			return "http_error", models.SourceStatusNotComparable,
+				fmt.Sprintf("Agent merespons HTTP %d; data sumber tidak dapat dibandingkan.", statusErr.StatusCode)
+		}
+	}
+
+	return "unreachable", models.SourceStatusUnreachable,
+		"Agent tidak dapat dijangkau; verifikasi data sumber belum dilakukan."
 }
 
 // recordClientSourceIncident records a discrepancy between a trusted latest
@@ -1922,9 +1956,8 @@ func (s *auditService) classifyResourceLog(auditLog models.AuditLog, isLatest, i
 
 	logCopy := auditLog
 	agentResult, err := s.agent.VerifyAgainstAgent(&logCopy)
-	if err != nil {
-		item.AgentStatus = "unreachable"
-		item.SourceStatus = models.SourceStatusUnreachable
+	if err != nil || agentResult == nil {
+		item.AgentStatus, item.SourceStatus, item.AgentMessage = classifyAgentVerificationFailure(err)
 	} else if agentResult.AgentUsed {
 		if agentResult.IsMatch {
 			item.AgentStatus = "matched"

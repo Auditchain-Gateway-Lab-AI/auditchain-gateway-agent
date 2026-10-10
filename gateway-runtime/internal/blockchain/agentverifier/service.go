@@ -63,6 +63,24 @@ type VerifyResult struct {
 	ClientStateHash string
 }
 
+// HTTPStatusError indicates that the Agent responded, but did not accept the
+// verification request. Callers can distinguish authorization/configuration
+// failures from transport failures without parsing an error string.
+type HTTPStatusError struct {
+	StatusCode int
+}
+
+func (e *HTTPStatusError) Error() string {
+	if e == nil {
+		return "Agent returned an HTTP error"
+	}
+	statusText := http.StatusText(e.StatusCode)
+	if statusText == "" {
+		return fmt.Sprintf("Agent returned HTTP %d", e.StatusCode)
+	}
+	return fmt.Sprintf("Agent returned HTTP %d %s", e.StatusCode, statusText)
+}
+
 // Service mengelola request verifikasi ke Agent klien
 type Service struct {
 	db *gorm.DB
@@ -277,11 +295,8 @@ func (s *Service) fetchResourceFromAgentContext(ctx context.Context, cfg *models
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode == http.StatusUnauthorized {
-		return nil, fmt.Errorf("token verifikasi Agent tidak valid (401)")
-	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("Agent mengembalikan status %d", resp.StatusCode)
+		return nil, &HTTPStatusError{StatusCode: resp.StatusCode}
 	}
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))

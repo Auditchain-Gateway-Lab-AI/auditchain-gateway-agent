@@ -2,10 +2,72 @@ package audit
 
 import (
 	"errors"
+	"fmt"
+	"net/http"
 	"testing"
 
+	"go-blockchain-api/internal/blockchain/agentverifier"
 	"go-blockchain-api/internal/models"
 )
+
+func TestClassifyAgentVerificationFailure(t *testing.T) {
+	tests := []struct {
+		name             string
+		err              error
+		wantAgentStatus  string
+		wantSourceStatus string
+	}{
+		{
+			name:             "forbidden is not unreachable",
+			err:              fmt.Errorf("wrapped verifier error: %w", &agentverifier.HTTPStatusError{StatusCode: http.StatusForbidden}),
+			wantAgentStatus:  "forbidden",
+			wantSourceStatus: models.SourceStatusNotComparable,
+		},
+		{
+			name:             "unauthorized is not unreachable",
+			err:              &agentverifier.HTTPStatusError{StatusCode: http.StatusUnauthorized},
+			wantAgentStatus:  "unauthorized",
+			wantSourceStatus: models.SourceStatusNotComparable,
+		},
+		{
+			name:             "other HTTP failures are not connectivity failures",
+			err:              &agentverifier.HTTPStatusError{StatusCode: http.StatusServiceUnavailable},
+			wantAgentStatus:  "http_error",
+			wantSourceStatus: models.SourceStatusNotComparable,
+		},
+		{
+			name:             "transport failure is unreachable",
+			err:              errors.New("dial tcp: connection refused"),
+			wantAgentStatus:  "unreachable",
+			wantSourceStatus: models.SourceStatusUnreachable,
+		},
+		{
+			name:             "missing result is invalid response",
+			wantAgentStatus:  "invalid_response",
+			wantSourceStatus: models.SourceStatusNotComparable,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotAgentStatus, gotSourceStatus, message := classifyAgentVerificationFailure(tt.err)
+			if gotAgentStatus != tt.wantAgentStatus || gotSourceStatus != tt.wantSourceStatus {
+				t.Fatalf("classification = (%q, %q), want (%q, %q)", gotAgentStatus, gotSourceStatus, tt.wantAgentStatus, tt.wantSourceStatus)
+			}
+			if message == "" {
+				t.Fatal("classification message is empty")
+			}
+		})
+	}
+}
+
+func TestSourceStatusFromAgentStatusTreatsDenialsAsNotComparable(t *testing.T) {
+	for _, status := range []string{"forbidden", "unauthorized", "http_error", "invalid_response"} {
+		if got := sourceStatusFromAgentStatus(status); got != models.SourceStatusNotComparable {
+			t.Errorf("sourceStatusFromAgentStatus(%q) = %q, want %q", status, got, models.SourceStatusNotComparable)
+		}
+	}
+}
 
 type verifyLogRepositoryStub struct {
 	AuditRepository
