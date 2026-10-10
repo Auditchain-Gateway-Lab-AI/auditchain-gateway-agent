@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"go-blockchain-api/internal/middleware"
+	"go-blockchain-api/internal/models"
 
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
@@ -901,11 +902,41 @@ func (h *Handler) GetOffchainDataForAgent(c *gin.Context) {
 		return
 	}
 
-	logs, err := h.Service.GetLogsByResource(c.Param("resource"), clientID)
+	resource := c.Param("resource")
+	if resource != "" {
+		resource = strings.TrimPrefix(resource, "/")
+	}
+	fromStr := c.Query("from")
+	toStr := c.Query("to")
+
+	var logs []models.AuditLog
+	var err error
+
+	if fromStr != "" && toStr != "" {
+		from, errFrom := parseTimeRobust(fromStr)
+		to, errTo := parseTimeRobust(toStr)
+		if errFrom != nil || errTo != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Format from/to tidak valid. Gunakan format RFC3339."})
+			return
+		}
+		logs, err = h.Service.GetLogsByTimeRange(from, to, clientID)
+	} else if resource != "" {
+		latestLog, errLatest := h.Service.GetLatestClientLogByResource(resource, clientID)
+		if errLatest != nil {
+			err = errLatest
+		} else if latestLog != nil {
+			logs = []models.AuditLog{*latestLog}
+		}
+	} else {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Harus menyertakan :resource di path atau parameter from & to"})
+		return
+	}
+
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Gagal mengambil data offchain"})
 		return
 	}
+
 	c.JSON(http.StatusOK, logs)
 }
 

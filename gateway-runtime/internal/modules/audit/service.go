@@ -121,6 +121,8 @@ type Service interface {
 	GetResourceInventory(clientID string) (interface{}, error)
 	VerifyResourceHistory(resource, clientID string) (*ResourceChainResult, error)
 	GetLogsByResource(resource, clientID string) ([]models.AuditLog, error)
+	GetLatestClientLogByResource(resource, clientID string) (*models.AuditLog, error)
+	GetLogsByTimeRange(from, to time.Time, clientID string) ([]models.AuditLog, error)
 	GetTableResources(tableName, clientID string) ([]ResourceLogVerification, error)
 	EstimateLogRange(from, to time.Time, clientID string) (int64, error)
 	VerifyInternalLogRange(from, to time.Time, clientID, requestID string) (*RangeVerificationResult, error)
@@ -1814,6 +1816,14 @@ func (s *auditService) VerifyResourceHistory(resource, clientID string) (*Resour
 
 func (s *auditService) GetLogsByResource(resource, clientID string) ([]models.AuditLog, error) {
 	return s.repo.GetLogsByResource(resource, clientID)
+}
+
+func (s *auditService) GetLatestClientLogByResource(resource, clientID string) (*models.AuditLog, error) {
+	return s.repo.GetLatestClientLogByResource(resource, clientID)
+}
+
+func (s *auditService) GetLogsByTimeRange(from, to time.Time, clientID string) ([]models.AuditLog, error) {
+	return s.repo.GetLogsByTimeRange(from, to, clientID)
 }
 
 func (s *auditService) GetTableResources(tableName, clientID string) ([]ResourceLogVerification, error) {
