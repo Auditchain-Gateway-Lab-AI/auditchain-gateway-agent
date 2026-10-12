@@ -10,12 +10,13 @@ import (
 )
 
 type Config struct {
-	Client   ClientConfig
-	SourceDB SourceDBConfig
-	Gateway  GatewayConfig
-	Kafka    KafkaConfig
-	Tables   []TableConfig `yaml:"tables"`
-	Recovery RecoveryConfig
+	Client     ClientConfig
+	SourceDB   SourceDBConfig
+	Gateway    GatewayConfig
+	Kafka      KafkaConfig
+	Tables     []TableConfig `yaml:"tables"`
+	Recovery   RecoveryConfig
+	AgentAudit AgentAuditConfig
 }
 
 type ClientConfig struct {
@@ -60,6 +61,27 @@ type RecoveryConfig struct {
 	RequestTimeoutSeconds int
 	RetentionDays         int
 	PolicyPath            string
+}
+
+// AgentAuditConfig enables a narrowly scoped, read-only API that reads the
+// Gateway audit database and evaluates Merkle anchors from Fabric. It is
+// disabled by default and is separate from the client-side Oracle verifier.
+type AgentAuditConfig struct {
+	Enabled     bool
+	ClientID    string
+	PostgresURL string
+	Fabric      FabricReadConfig
+}
+
+type FabricReadConfig struct {
+	MSPID         string
+	PeerEndpoint  string
+	TLSServerName string
+	TLSCertPath   string
+	CertPath      string
+	KeyPath       string
+	Channel       string
+	Chaincode     string
 }
 
 func Load(configPath string) (*Config, error) {
@@ -107,6 +129,37 @@ func Load(configPath string) (*Config, error) {
 	cfg.Recovery.PolicyPath = getEnv("AGENT_RECOVERY_POLICY_PATH", "./recovery-policy.yml")
 	if err := cfg.Recovery.Validate(cfg.VerifyToken()); err != nil {
 		return nil, err
+	}
+
+	auditEnabled, err := getEnvBool("AGENT_AUDIT_MODULE_ENABLED", false)
+	if err != nil {
+		return nil, fmt.Errorf("invalid AGENT_AUDIT_MODULE_ENABLED: %w", err)
+	}
+	cfg.AgentAudit = AgentAuditConfig{
+		Enabled:     auditEnabled,
+		ClientID:    getEnv("AGENT_AUDIT_CLIENT_ID", getEnv("AGENT_CLIENT_ID", "")),
+		PostgresURL: getEnv("AGENT_AUDIT_POSTGRES_URL", ""),
+		Fabric: FabricReadConfig{
+			MSPID:         getEnv("AGENT_AUDIT_FABRIC_MSP_ID", ""),
+			PeerEndpoint:  getEnv("AGENT_AUDIT_FABRIC_PEER_ENDPOINT", ""),
+			TLSServerName: getEnv("AGENT_AUDIT_FABRIC_TLS_SERVER_NAME", ""),
+			TLSCertPath:   getEnv("AGENT_AUDIT_FABRIC_TLS_CERT_PATH", ""),
+			CertPath:      getEnv("AGENT_AUDIT_FABRIC_CERT_PATH", ""),
+			KeyPath:       getEnv("AGENT_AUDIT_FABRIC_KEY_PATH", ""),
+			Channel:       getEnv("AGENT_AUDIT_FABRIC_CHANNEL", ""),
+			Chaincode:     getEnv("AGENT_AUDIT_FABRIC_CHAINCODE", ""),
+		},
+	}
+	if cfg.AgentAudit.Enabled {
+		if cfg.AgentAudit.ClientID == "" {
+			return nil, fmt.Errorf("AGENT_AUDIT_CLIENT_ID wajib diisi saat modul audit aktif")
+		}
+		if cfg.AgentAudit.PostgresURL == "" {
+			return nil, fmt.Errorf("AGENT_AUDIT_POSTGRES_URL wajib diisi saat modul audit aktif")
+		}
+		if cfg.VerifyToken() == "" {
+			return nil, fmt.Errorf("AGENT_VERIFY_TOKEN wajib diisi saat modul audit aktif")
+		}
 	}
 
 	return &cfg, nil

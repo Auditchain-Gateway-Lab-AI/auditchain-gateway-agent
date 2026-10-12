@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"auditchain-agent/internal/config"
+	agentaudit "auditchain-agent/internal/modules/agent_audit"
 	"auditchain-agent/internal/recovery"
 	"auditchain-agent/internal/verify"
 
@@ -73,6 +74,42 @@ func main() {
 		log.Fatalf("❌ AGENT_ENABLE_TABLE_ENDPOINT tidak valid: %v", err)
 	} else {
 		verifyServer.EnableTableEndpoint(enabled)
+	}
+
+	if cfg.AgentAudit.Enabled {
+		auditDB, err := sql.Open("pgx", cfg.AgentAudit.PostgresURL)
+		if err != nil {
+			log.Fatalf("❌ Gagal membuka koneksi read-only ke PostgreSQL Gateway: %v", err)
+		}
+		defer auditDB.Close()
+		auditDB.SetMaxOpenConns(5)
+		auditDB.SetMaxIdleConns(2)
+		auditDB.SetConnMaxLifetime(5 * time.Minute)
+
+		pingCtx, pingCancel := context.WithTimeout(ctx, 5*time.Second)
+		if err := auditDB.PingContext(pingCtx); err != nil {
+			pingCancel()
+			log.Fatalf("❌ PostgreSQL Gateway read-only tidak bisa dijangkau: %v", err)
+		}
+		pingCancel()
+
+		fabricReader, err := agentaudit.NewFabricReader(cfg.AgentAudit.Fabric)
+		if err != nil {
+			log.Fatalf("❌ Gagal menginisialisasi pembaca Fabric: %v", err)
+		}
+		defer fabricReader.Close()
+
+		auditHandler, err := agentaudit.NewHandler(
+			cfg.AgentAudit.ClientID,
+			verifyToken,
+			agentaudit.NewPostgresStore(auditDB),
+			fabricReader,
+		)
+		if err != nil {
+			log.Fatalf("❌ Gagal menginisialisasi modul audit read-only: %v", err)
+		}
+		verifyServer.SetAgentAuditHandler(auditHandler)
+		log.Println("✅ Modul audit read-only aktif (PostgreSQL baca-saja + Fabric Evaluate; Kafka tidak diaktifkan)")
 	}
 
 	var recoveryPolicy *recovery.PolicySet

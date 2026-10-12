@@ -45,6 +45,7 @@ type Server struct {
 	port                 string
 	recoveryHandler      http.Handler
 	metricsHandler       http.Handler
+	agentAuditHandler    http.Handler
 	readProjection       func(string) (ReadProjection, bool)
 	tableEndpointEnabled bool
 	maxResponseBytes     int64
@@ -60,6 +61,12 @@ func (s *Server) SetRecoveryHandler(handler http.Handler) {
 
 func (s *Server) SetMetricsHandler(handler http.Handler) {
 	s.metricsHandler = handler
+}
+
+// SetAgentAuditHandler mounts the optional read-only Gateway audit module on
+// the existing Agent listener. A nil handler leaves those routes unavailable.
+func (s *Server) SetAgentAuditHandler(handler http.Handler) {
+	s.agentAuditHandler = handler
 }
 
 func (s *Server) SetReadProjection(lookup func(string) (ReadProjection, bool)) {
@@ -94,6 +101,9 @@ func (s *Server) Handler() http.Handler {
 	}
 	if s.metricsHandler != nil {
 		mux.Handle("/metrics", s.metricsHandler)
+	}
+	if s.agentAuditHandler != nil {
+		mux.Handle("/api/agent/", s.agentAuditHandler)
 	}
 	return mux
 }
