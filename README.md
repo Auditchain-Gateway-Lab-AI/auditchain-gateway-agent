@@ -42,40 +42,33 @@ token, secret, binary, LOB, generated, atau virtual column.
 
 ## POC Modul Audit Read-Only
 
-`internal/modules/agent_audit` menyediakan endpoint opsional untuk membaca
-log Gateway dari PostgreSQL Besu dan membandingkan Merkle root dengan anchor
-Fabric. Modul ini mati secara default (`AGENT_AUDIT_MODULE_ENABLED=false`) dan
-berjalan pada listener Agent yang sama; modul ini bukan pengganti seluruh
-backend Besu dan tidak memindahkan consumer Kafka.
+`internal/modules/agent_audit` menyediakan endpoint opsional pada Agent yang
+meneruskan permintaan baca ke API Gateway Besu. PostgreSQL off-chain dan Fabric
+tetap berada di Besu; Agent tidak membuka koneksi langsung ke keduanya. Modul
+mati secara default (`AGENT_AUDIT_MODULE_ENABLED=false`) dan tidak memindahkan
+consumer Kafka atau proses anchoring.
 
 - `GET /api/agent/offchain-data/:resource` mengambil log terbaru untuk resource.
 - `GET /api/agent/offchain-data?from=<RFC3339>&to=<RFC3339>` mengambil rentang
   log dengan batas jumlah dan ukuran respons.
-- `POST /api/agent/verify-merkle-root` mengevaluasi anchor Fabric secara
-  read-only (`EvaluateTransaction`) lalu membandingkan root.
+- `POST /api/agent/verify-merkle-root` meminta Besu membandingkan Merkle root
+  dengan anchor Fabric.
 
-Semua route memerlukan `Authorization: Bearer <AGENT_VERIFY_TOKEN>`; endpoint
-offchain juga mensyaratkan `X-Client-ID` yang sama dengan
-`AGENT_AUDIT_CLIENT_ID`. Saat POC diaktifkan, gunakan role PostgreSQL terpisah
-yang hanya memiliki `SELECT` pada `audit_logs`, URL TLS yang sesuai, serta
-sertifikat Fabric yang dipasang sebagai secret read-only. Kode hanya membuka
-transaksi PostgreSQL read-only dan tidak memanggil Kafka, endpoint tulis
-Fabric, atau operasi mutasi database. `.env.example` mencantumkan nama
-konfigurasinya; jangan menaruh kredensial nyata di Git.
+Panggilan ke listener Agent memerlukan `Authorization: Bearer
+<AGENT_VERIFY_TOKEN>`; Agent meneruskan permintaan ke Besu menggunakan
+`GATEWAY_URL`, API key tenant `AUDITCHAIN_API_KEY`, dan
+`AGENT_AUDIT_CLIENT_ID`. API key mengautentikasi identitas tenant di Besu.
+Jangan menaruh nilai rahasia nyata di Git.
 
 Untuk uji terpisah tanpa mengganti container Agent utama, tersedia
 `docker-compose.agent-audit-poc.yml`. Service uji memakai port `9091`, bind ke
 `127.0.0.1` secara default, dan recovery dimatikan. Sebelum menjalankannya:
 
-1. Isi nilai `AGENT_AUDIT_*` di `.env` lokal. Gunakan PostgreSQL Besu yang
-   dapat dijangkau dari Mini PC dan akun khusus yang hanya memiliki izin baca
-   pada `public.audit_logs`.
-2. Siapkan direktori `AGENT_AUDIT_FABRIC_SECRETS_DIR` di host dengan tiga file:
-   `ca.crt`, `client-cert.pem`, dan `client-key.pem`. Pastikan user container
-   (UID 1000) dapat membaca file tersebut; direktori dipasang read-only.
-3. Isi endpoint peer, nama TLS, MSP, channel, dan chaincode yang benar untuk
-   jaringan Fabric. Nilai channel dan chaincode harus sesuai deployment.
-4. Validasi konfigurasi lalu jalankan service uji:
+1. Isi `GATEWAY_URL`, `AUDITCHAIN_API_KEY`, `AGENT_AUDIT_CLIENT_ID`, dan token
+   Agent di `.env` lokal. API key harus milik client ID yang sama.
+2. Pastikan backend Besu yang dituju mendaftarkan rute `/api/agent/*` dengan
+   autentikasi API key tenant; rute tanpa autentikasi tidak boleh dipakai.
+3. Validasi konfigurasi lalu jalankan service uji:
 
    ```bash
    docker-compose -f docker-compose.agent-audit-poc.yml config >/dev/null
@@ -86,11 +79,9 @@ Untuk uji terpisah tanpa mengganti container Agent utama, tersedia
    curl -i --max-time 10 http://127.0.0.1:9091/health
    ```
 
-Service ini hanya memberi bukti konektivitas baca dari Agent ke PostgreSQL
-Gateway dan Fabric. Ia tidak mengambil alih API Gateway, consumer Kafka,
-normalisasi CDC, atau proses anchoring. Uji endpoint dengan token dan client ID
-yang sesuai sebelum menghubungkan caller lain. Setelah uji selesai, hapus hanya
-container uji dengan:
+Service ini hanya menguji proxy baca Agent → API Besu. Ia tidak mengambil alih
+off-chain storage, Fabric, consumer Kafka, normalisasi CDC, atau anchoring.
+Setelah uji selesai, hapus hanya container uji dengan:
 
 ```bash
 docker-compose -f docker-compose.agent-audit-poc.yml down

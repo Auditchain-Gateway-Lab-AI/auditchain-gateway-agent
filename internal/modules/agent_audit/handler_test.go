@@ -33,7 +33,7 @@ type fakeFabric struct {
 	calls int
 }
 
-func (f *fakeFabric) QueryMerkleRoot(_ string) (string, error) {
+func (f *fakeFabric) VerifyMerkleRoot(_, _ string) (string, error) {
 	f.calls++
 	return f.root, nil
 }

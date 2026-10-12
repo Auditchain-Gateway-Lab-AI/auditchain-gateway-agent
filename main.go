@@ -77,39 +77,26 @@ func main() {
 	}
 
 	if cfg.AgentAudit.Enabled {
-		auditDB, err := sql.Open("pgx", cfg.AgentAudit.PostgresURL)
+		gatewayClient, err := agentaudit.NewGatewayClient(
+			cfg.Gateway.URL,
+			cfg.Client.APIKey,
+			cfg.AgentAudit.ClientID,
+		)
 		if err != nil {
-			log.Fatalf("❌ Gagal membuka koneksi read-only ke PostgreSQL Gateway: %v", err)
+			log.Fatalf("❌ Gagal menginisialisasi client API Gateway Besu: %v", err)
 		}
-		defer auditDB.Close()
-		auditDB.SetMaxOpenConns(5)
-		auditDB.SetMaxIdleConns(2)
-		auditDB.SetConnMaxLifetime(5 * time.Minute)
-
-		pingCtx, pingCancel := context.WithTimeout(ctx, 5*time.Second)
-		if err := auditDB.PingContext(pingCtx); err != nil {
-			pingCancel()
-			log.Fatalf("❌ PostgreSQL Gateway read-only tidak bisa dijangkau: %v", err)
-		}
-		pingCancel()
-
-		fabricReader, err := agentaudit.NewFabricReader(cfg.AgentAudit.Fabric)
-		if err != nil {
-			log.Fatalf("❌ Gagal menginisialisasi pembaca Fabric: %v", err)
-		}
-		defer fabricReader.Close()
 
 		auditHandler, err := agentaudit.NewHandler(
 			cfg.AgentAudit.ClientID,
 			verifyToken,
-			agentaudit.NewPostgresStore(auditDB),
-			fabricReader,
+			gatewayClient,
+			gatewayClient,
 		)
 		if err != nil {
 			log.Fatalf("❌ Gagal menginisialisasi modul audit read-only: %v", err)
 		}
 		verifyServer.SetAgentAuditHandler(auditHandler)
-		log.Println("✅ Modul audit read-only aktif (PostgreSQL baca-saja + Fabric Evaluate; Kafka tidak diaktifkan)")
+		log.Println("✅ Modul audit aktif melalui API Gateway Besu (off-chain PostgreSQL dan Fabric tetap di Besu)")
 	}
 
 	var recoveryPolicy *recovery.PolicySet

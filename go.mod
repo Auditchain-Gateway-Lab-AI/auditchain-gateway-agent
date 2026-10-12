@@ -3,17 +3,14 @@ module auditchain-agent
 go 1.25.0
 
 require (
-	github.com/hyperledger/fabric-gateway v1.10.1
 	github.com/jackc/pgx/v5 v5.9.2
 	github.com/joho/godotenv v1.5.1
 	github.com/segmentio/kafka-go v0.4.51
 	github.com/sijms/go-ora/v2 v2.9.0
-	google.golang.org/grpc v1.78.0
 	gopkg.in/yaml.v3 v3.0.1
 )
 
 require (
-	github.com/hyperledger/fabric-protos-go-apiv2 v0.3.7 // indirect
 	github.com/jackc/pgpassfile v1.0.0 // indirect
 	github.com/jackc/pgservicefile v0.0.0-20240606120523-5a60cdf6a761 // indirect
 	github.com/jackc/puddle/v2 v2.2.2 // indirect

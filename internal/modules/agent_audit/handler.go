@@ -28,18 +28,18 @@ type OffchainStore interface {
 	ByTimeRange(ctx context.Context, clientID string, from, to time.Time, limit int) ([]json.RawMessage, error)
 }
 
-type FabricAnchorReader interface {
-	QueryMerkleRoot(anchorID string) (string, error)
+type MerkleRootVerifier interface {
+	VerifyMerkleRoot(anchorID, expectedRoot string) (string, error)
 }
 
 type Handler struct {
 	clientID string
 	token    string
 	store    OffchainStore
-	fabric   FabricAnchorReader
+	verifier MerkleRootVerifier
 }
 
-func NewHandler(clientID, token string, store OffchainStore, fabric FabricAnchorReader) (*Handler, error) {
+func NewHandler(clientID, token string, store OffchainStore, verifier MerkleRootVerifier) (*Handler, error) {
 	if strings.TrimSpace(clientID) == "" {
 		return nil, errConfig("client ID is required")
 	}
@@ -49,10 +49,10 @@ func NewHandler(clientID, token string, store OffchainStore, fabric FabricAnchor
 	if store == nil {
 		return nil, errConfig("offchain store is required")
 	}
-	if fabric == nil {
-		return nil, errConfig("Fabric anchor reader is required")
+	if verifier == nil {
+		return nil, errConfig("Merkle root verifier is required")
 	}
-	return &Handler{clientID: clientID, token: token, store: store, fabric: fabric}, nil
+	return &Handler{clientID: clientID, token: token, store: store, verifier: verifier}, nil
 }
 
 type configError string
@@ -166,9 +166,9 @@ func (h *Handler) handleVerifyMerkleRoot(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	actualText, err := h.fabric.QueryMerkleRoot(request.BlockchainTxID)
+	actualText, err := h.verifier.VerifyMerkleRoot(request.BlockchainTxID, request.MerkleRoot)
 	if err != nil {
-		writeError(w, http.StatusBadGateway, "gagal membaca anchor dari Fabric")
+		writeError(w, http.StatusBadGateway, "gagal memverifikasi anchor melalui Besu Gateway")
 		return
 	}
 	actualRoot, ok := normalizedRoot(actualText)
