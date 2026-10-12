@@ -61,10 +61,40 @@ yang hanya memiliki `SELECT` pada `audit_logs`, URL TLS yang sesuai, serta
 sertifikat Fabric yang dipasang sebagai secret read-only. Kode hanya membuka
 transaksi PostgreSQL read-only dan tidak memanggil Kafka, endpoint tulis
 Fabric, atau operasi mutasi database. `.env.example` mencantumkan nama
-konfigurasinya; jangan menaruh kredensial nyata di Git. Compose belum
-menyiapkan network PostgreSQL Besu maupun mount sertifikat Fabric untuk modul
-ini, jadi jangan ubah flag menjadi `true` sebelum wiring deployment tersebut
-ditinjau dan diuji terpisah.
+konfigurasinya; jangan menaruh kredensial nyata di Git.
+
+Untuk uji terpisah tanpa mengganti container Agent utama, tersedia
+`docker-compose.agent-audit-poc.yml`. Service uji memakai port `9091`, bind ke
+`127.0.0.1` secara default, dan recovery dimatikan. Sebelum menjalankannya:
+
+1. Isi nilai `AGENT_AUDIT_*` di `.env` lokal. Gunakan PostgreSQL Besu yang
+   dapat dijangkau dari Mini PC dan akun khusus yang hanya memiliki izin baca
+   pada `public.audit_logs`.
+2. Siapkan direktori `AGENT_AUDIT_FABRIC_SECRETS_DIR` di host dengan tiga file:
+   `ca.crt`, `client-cert.pem`, dan `client-key.pem`. Pastikan user container
+   (UID 1000) dapat membaca file tersebut; direktori dipasang read-only.
+3. Isi endpoint peer, nama TLS, MSP, channel, dan chaincode yang benar untuk
+   jaringan Fabric. Nilai channel dan chaincode harus sesuai deployment.
+4. Validasi konfigurasi lalu jalankan service uji:
+
+   ```bash
+   docker-compose -f docker-compose.agent-audit-poc.yml config >/dev/null
+   docker-compose -f docker-compose.agent-audit-poc.yml up -d --build
+   docker inspect auditchain-agent-audit-poc \
+     --format 'status={{.State.Status}} health={{.State.Health.Status}}'
+   docker logs --tail=80 auditchain-agent-audit-poc
+   curl -i --max-time 10 http://127.0.0.1:9091/health
+   ```
+
+Service ini hanya memberi bukti konektivitas baca dari Agent ke PostgreSQL
+Gateway dan Fabric. Ia tidak mengambil alih API Gateway, consumer Kafka,
+normalisasi CDC, atau proses anchoring. Uji endpoint dengan token dan client ID
+yang sesuai sebelum menghubungkan caller lain. Setelah uji selesai, hapus hanya
+container uji dengan:
+
+```bash
+docker-compose -f docker-compose.agent-audit-poc.yml down
+```
 
 ## Menjalankan
 

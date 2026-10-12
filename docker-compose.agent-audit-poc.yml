@@ -1,0 +1,44 @@
+version: "3.9"
+
+# Isolated read-only audit-module trial. This service does not replace the
+# existing Agent container and binds only to loopback unless explicitly changed.
+services:
+  auditchain-agent-audit-poc:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: auditchain-agent:latest
+    container_name: auditchain-agent-audit-poc
+    restart: "no"
+    environment:
+      DB_HOST: ${DB_HOST:?set DB_HOST in .env}
+      DB_PORT: ${DB_PORT:-1521}
+      DB_USER: ${DB_USER:?set DB_USER in .env}
+      DB_PASSWORD: ${DB_PASSWORD:?set DB_PASSWORD in .env}
+      DB_NAME: ${DB_NAME:-ORCLCDB}
+      AGENT_VERIFY_TOKEN: ${AGENT_VERIFY_TOKEN:?set AGENT_VERIFY_TOKEN in .env}
+      AGENT_VERIFY_PORT: "9091"
+      AGENT_ENABLE_TABLE_ENDPOINT: "false"
+      AGENT_RECOVERY_ENABLED: "false"
+      AGENT_AUDIT_MODULE_ENABLED: "true"
+      AGENT_AUDIT_CLIENT_ID: ${AGENT_AUDIT_CLIENT_ID:?set AGENT_AUDIT_CLIENT_ID in .env}
+      AGENT_AUDIT_POSTGRES_URL: ${AGENT_AUDIT_POSTGRES_URL:?set AGENT_AUDIT_POSTGRES_URL in .env}
+      AGENT_AUDIT_FABRIC_MSP_ID: ${AGENT_AUDIT_FABRIC_MSP_ID:?set AGENT_AUDIT_FABRIC_MSP_ID in .env}
+      AGENT_AUDIT_FABRIC_PEER_ENDPOINT: ${AGENT_AUDIT_FABRIC_PEER_ENDPOINT:?set AGENT_AUDIT_FABRIC_PEER_ENDPOINT in .env}
+      AGENT_AUDIT_FABRIC_TLS_SERVER_NAME: ${AGENT_AUDIT_FABRIC_TLS_SERVER_NAME:?set AGENT_AUDIT_FABRIC_TLS_SERVER_NAME in .env}
+      AGENT_AUDIT_FABRIC_TLS_CERT_PATH: /run/secrets/agent-audit-fabric/ca.crt
+      AGENT_AUDIT_FABRIC_CERT_PATH: /run/secrets/agent-audit-fabric/client-cert.pem
+      AGENT_AUDIT_FABRIC_KEY_PATH: /run/secrets/agent-audit-fabric/client-key.pem
+      AGENT_AUDIT_FABRIC_CHANNEL: ${AGENT_AUDIT_FABRIC_CHANNEL:?set AGENT_AUDIT_FABRIC_CHANNEL in .env}
+      AGENT_AUDIT_FABRIC_CHAINCODE: ${AGENT_AUDIT_FABRIC_CHAINCODE:?set AGENT_AUDIT_FABRIC_CHAINCODE in .env}
+    ports:
+      - "${AGENT_AUDIT_POC_BIND_IP:-127.0.0.1}:9091:9091"
+    volumes:
+      - ./config.yml:/app/config.yml:ro
+      - ${AGENT_AUDIT_FABRIC_SECRETS_DIR:?set AGENT_AUDIT_FABRIC_SECRETS_DIR in .env}:/run/secrets/agent-audit-fabric:ro
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:9091/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
