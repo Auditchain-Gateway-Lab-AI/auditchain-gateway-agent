@@ -30,11 +30,13 @@ services:
       AGENT_RECOVERY_REQUEST_TIMEOUT_SECONDS: ${AGENT_RECOVERY_REQUEST_TIMEOUT_SECONDS:-15}
       AGENT_RECOVERY_RETENTION_DAYS: ${AGENT_RECOVERY_RETENTION_DAYS:-90}
       AGENT_RECOVERY_POLICY_PATH: ${AGENT_RECOVERY_POLICY_PATH:-/app/recovery-policy.yml}
+      AGENT_VERIFY_POLICY_PATH: ${AGENT_VERIFY_POLICY_PATH:-/app/verify-policy.yml}
     ports:
       - "${AGENT_VERIFY_PORT:-9090}:${AGENT_VERIFY_PORT:-9090}"
     volumes:
       - ./config.yml:/app/config.yml:ro
       - ./recovery-policy.yml:/app/recovery-policy.yml:ro
+      - ./verify-policy.yml:/app/verify-policy.yml:ro
       - auditchain-agent-recovery-state:/var/lib/auditchain-agent
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:9090/health"]

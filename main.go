@@ -79,6 +79,14 @@ func main() {
 		verifyServer.EnableTableEndpoint(enabled)
 	}
 
+	verifyPolicyPath := getEnv("AGENT_VERIFY_POLICY_PATH", "./verify-policy.yml")
+	verifyPolicy, err := verify.LoadReadPolicy(verifyPolicyPath)
+	if err != nil {
+		log.Fatalf("❌ Gagal load verify read policy: %v", err)
+	}
+	verifyServer.SetReadProjection(verifyPolicy.ReadMapping)
+	log.Printf("✅ Verify read policy dimuat (%d tabel)", verifyPolicy.TableCount())
+
 	var recoveryPolicy *recovery.PolicySet
 	if cfg.Recovery.Enabled {
 		recoveryPolicy, err = recovery.LoadPolicy(cfg.Recovery.PolicyPath)
@@ -90,19 +98,6 @@ func main() {
 			log.Fatalf("❌ Gagal menghitung hash recovery policy: %v", hashErr)
 		}
 		log.Printf("✅ Recovery policy dimuat (hash=%s)", policyHash[:16])
-
-		verifyServer.SetReadProjection(func(resourceTable string) (verify.ReadProjection, bool) {
-			mapping, ok := recoveryPolicy.ReadMapping(resourceTable)
-			if !ok {
-				return verify.ReadProjection{}, false
-			}
-			return verify.ReadProjection{
-				Schema:       mapping.Schema,
-				Table:        mapping.Table,
-				PrimaryKey:   mapping.PrimaryKey,
-				StateColumns: mapping.StateColumns,
-			}, true
-		})
 
 		stateStore, storeErr := recovery.OpenIdempotencyStore(cfg.Recovery.StatePath)
 		if storeErr != nil {

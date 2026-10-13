@@ -47,9 +47,15 @@ tables:
     source_system: SIMRS-Pasien
 ```
 
-Untuk recovery, copy `recovery-policy.example.yml` menjadi policy lokal yang
-sudah direview. Policy harus exact dan tidak boleh memuat credential, password,
-token, secret, binary, LOB, generated, atau virtual column.
+Verifikasi baris sumber memakai allowlist baca-saja verify-policy.yml.
+Salin verify-policy.example.yml sebagai awal konfigurasi; setiap mapping harus
+menentukan schema, tabel, primary key, dan kolom state yang sudah dikonfirmasi
+di Oracle. Tabel yang tidak tercantum ditolak (fail-closed). Atur lokasinya
+dengan AGENT_VERIFY_POLICY_PATH.
+
+Recovery memakai recovery-policy.yml yang terpisah. Izin membaca tabel tidak
+memberi izin UPSERT/DELETE; recovery tetap disabled secara default dan hanya
+berjalan untuk tabel/kolom/operasi yang diizinkan policy recovery.
 
 ## Menjalankan
 
