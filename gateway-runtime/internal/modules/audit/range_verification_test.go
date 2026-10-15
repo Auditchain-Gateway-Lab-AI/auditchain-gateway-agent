@@ -112,21 +112,3 @@ func TestVerifyRangeBatchUsesBoundedPageAndCachedSummary(t *testing.T) {
 		t.Fatalf("unexpected batch summary: %+v", summary)
 	}
 }
-
-func TestIntegritySourceForVerificationRun(t *testing.T) {
-	tests := []struct {
-		requestedBy string
-		want        string
-	}{
-		{requestedBy: "system:scheduler", want: models.IntegritySourceScheduledRun},
-		{requestedBy: " SYSTEM:SCHEDULER ", want: models.IntegritySourceScheduledRun},
-		{requestedBy: "user-123", want: models.IntegritySourceBackgroundRun},
-		{requestedBy: "", want: models.IntegritySourceBackgroundRun},
-	}
-
-	for _, test := range tests {
-		if got := integritySourceForVerificationRun(test.requestedBy); got != test.want {
-			t.Errorf("integritySourceForVerificationRun(%q) = %q, want %q", test.requestedBy, got, test.want)
-		}
-	}
-}

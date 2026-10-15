@@ -34,23 +34,6 @@ func TestDirectSourceStatusDistinguishesMismatchAndMissing(t *testing.T) {
 	}
 }
 
-func TestDirectCDCMatchesCanonicalizesMetadata(t *testing.T) {
-	request := &models.RecoveryRequest{
-		ClientID: "client-a", Resource: "RUANGAN:7", Operation: models.RecoveryOperationUpsert,
-		DesiredStateHash: "",
-	}
-	state := map[string]interface{}{"id": 7, "nama": "A"}
-	hash, err := agentverifier.HashResourceState(request.ClientID, request.Resource, state)
-	if err != nil {
-		t.Fatalf("HashResourceState() error = %v", err)
-	}
-	request.DesiredStateHash = hash
-	logRow := &models.AuditLog{Action: "UPDATE", Metadata: `{"NAMA":"A","ID":7}`}
-	if !directCDCMatches(request, logRow) {
-		t.Fatal("CDC metadata should match canonical desired state")
-	}
-}
-
 func TestDirectFailureStatusesSeparateVerificationAndExecution(t *testing.T) {
 	requestStatus, eventStatus := directFailureStatuses("source_state_changed")
 	if requestStatus != models.RecoveryStatusFailedVerification || eventStatus != models.RecoveryResultVerification {

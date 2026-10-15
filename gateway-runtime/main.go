@@ -19,23 +19,16 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
 	"github.com/joho/godotenv"
-	"gorm.io/gorm"
 
 	"go-blockchain-api/internal/api"
 	"go-blockchain-api/internal/blockchain"
 	"go-blockchain-api/internal/blockchain/agentverifier"
 	"go-blockchain-api/internal/config"
-	"go-blockchain-api/internal/engine/aggregator"
-	"go-blockchain-api/internal/engine/hasher"
-	"go-blockchain-api/internal/engine/kafkaconsumer"
-	"go-blockchain-api/internal/engine/snapshotworker"
-	"go-blockchain-api/internal/engine/tamperscanner"
 	"go-blockchain-api/internal/modules/audit"
 	"go-blockchain-api/internal/modules/auth"
 	"go-blockchain-api/internal/modules/client"
@@ -54,33 +47,6 @@ func snapshotRequiredForAnchor() bool {
 
 func recoveryEnabled() bool {
 	return strings.EqualFold(strings.TrimSpace(os.Getenv("RECOVERY_ENABLED")), "true")
-}
-
-func tamperScannerEnabled() bool {
-	return strings.EqualFold(strings.TrimSpace(os.Getenv("TAMPER_SCANNER_ENABLED")), "true")
-}
-
-func loadBackgroundWorkersConfig() (bool, string, error) {
-	enabled := false
-	rawEnabled := strings.TrimSpace(os.Getenv("GATEWAY_BACKGROUND_WORKERS_ENABLED"))
-	if rawEnabled != "" {
-		switch strings.ToLower(rawEnabled) {
-		case "true":
-			enabled = true
-		case "false":
-		default:
-			return false, "", fmt.Errorf("GATEWAY_BACKGROUND_WORKERS_ENABLED harus berupa true atau false")
-		}
-	}
-	if !enabled {
-		return false, "", nil
-	}
-
-	startOffset := strings.ToLower(strings.TrimSpace(os.Getenv("KAFKA_CONSUMER_START_OFFSET")))
-	if startOffset != "earliest" && startOffset != "latest" {
-		return false, "", fmt.Errorf("saat background workers aktif, KAFKA_CONSUMER_START_OFFSET wajib earliest atau latest")
-	}
-	return true, startOffset, nil
 }
 
 func configuredRecoveryMode() string {
@@ -132,231 +98,6 @@ func buildSnapshotRuntime(recoveryMode string) (snapshotstore.OutboxBuilder, sna
 	return snapshotstore.AuditSnapshotOutboxBuilder{Cipher: cipher}, store, cipher, nil
 }
 
-func loadSnapshotWorkerConfig() (snapshotworker.Config, error) {
-	parsePositiveInt := func(name string, fallback int) (int, error) {
-		raw := strings.TrimSpace(os.Getenv(name))
-		if raw == "" {
-			return fallback, nil
-		}
-		value, err := strconv.Atoi(raw)
-		if err != nil || value <= 0 {
-			return 0, fmt.Errorf("%s harus berupa bilangan bulat positif", name)
-		}
-		return value, nil
-	}
-
-	maxAttempts, err := parsePositiveInt("SNAPSHOT_MAX_ATTEMPTS", 10)
-	if err != nil {
-		return snapshotworker.Config{}, err
-	}
-	concurrency, err := parsePositiveInt("SNAPSHOT_WORKER_CONCURRENCY", 1)
-	if err != nil {
-		return snapshotworker.Config{}, err
-	}
-	retrySeconds, err := parsePositiveInt("SNAPSHOT_RETRY_BASE_SECONDS", 5)
-	if err != nil {
-		return snapshotworker.Config{}, err
-	}
-	pollSeconds, err := parsePositiveInt("SNAPSHOT_POLL_INTERVAL_SECONDS", 2)
-	if err != nil {
-		return snapshotworker.Config{}, err
-	}
-
-	return snapshotworker.Config{
-		Environment:  os.Getenv("APP_ENV"),
-		MaxAttempts:  maxAttempts,
-		Concurrency:  concurrency,
-		RetryBase:    time.Duration(retrySeconds) * time.Second,
-		PollInterval: time.Duration(pollSeconds) * time.Second,
-	}, nil
-}
-
-func loadTamperScannerConfig(recoveryCutoff *time.Time) (tamperscanner.Config, error) {
-	parsePositiveInt := func(name string, fallback int) (int, error) {
-		raw := strings.TrimSpace(os.Getenv(name))
-		if raw == "" {
-			return fallback, nil
-		}
-		value, err := strconv.Atoi(raw)
-		if err != nil || value <= 0 {
-			return 0, fmt.Errorf("%s harus berupa bilangan bulat positif", name)
-		}
-		return value, nil
-	}
-
-	intervalSeconds, err := parsePositiveInt("TAMPER_SCAN_INTERVAL_SECONDS", 300)
-	if err != nil {
-		return tamperscanner.Config{}, err
-	}
-	batchSize, err := parsePositiveInt("TAMPER_SCAN_BATCH_SIZE", 100)
-	if err != nil {
-		return tamperscanner.Config{}, err
-	}
-	concurrency, err := parsePositiveInt("TAMPER_SCAN_CONCURRENCY", 2)
-	if err != nil {
-		return tamperscanner.Config{}, err
-	}
-	return tamperscanner.Config{
-		Enabled:        tamperScannerEnabled(),
-		Interval:       time.Duration(intervalSeconds) * time.Second,
-		BatchSize:      batchSize,
-		Concurrency:    concurrency,
-		RecoveryCutoff: recoveryCutoff,
-	}, nil
-}
-
-func loadVerificationSchedulerConfig() (audit.VerificationSchedulerConfig, error) {
-	parsePositiveInt := func(name string, fallback int) (int, error) {
-		raw := strings.TrimSpace(os.Getenv(name))
-		if raw == "" {
-			return fallback, nil
-		}
-		value, err := strconv.Atoi(raw)
-		if err != nil || value <= 0 {
-			return 0, fmt.Errorf("%s harus berupa bilangan bulat positif", name)
-		}
-		return value, nil
-	}
-	parseNonNegativeInt := func(name string, fallback int) (int, error) {
-		raw := strings.TrimSpace(os.Getenv(name))
-		if raw == "" {
-			return fallback, nil
-		}
-		value, err := strconv.Atoi(raw)
-		if err != nil || value < 0 {
-			return 0, fmt.Errorf("%s harus berupa bilangan bulat nol atau positif", name)
-		}
-		return value, nil
-	}
-	parseBool := func(name string, fallback bool) (bool, error) {
-		raw := strings.TrimSpace(os.Getenv(name))
-		if raw == "" {
-			return fallback, nil
-		}
-		value, err := strconv.ParseBool(raw)
-		if err != nil {
-			return false, fmt.Errorf("%s harus berupa true atau false", name)
-		}
-		return value, nil
-	}
-
-	enabled, err := parseBool("VERIFICATION_SCHEDULER_ENABLED", false)
-	if err != nil {
-		return audit.VerificationSchedulerConfig{}, err
-	}
-	intervalSeconds, err := parsePositiveInt("VERIFICATION_SCHEDULER_INTERVAL_SECONDS", 86400)
-	if err != nil {
-		return audit.VerificationSchedulerConfig{}, err
-	}
-	lookbackHours, err := parsePositiveInt("VERIFICATION_SCHEDULER_LOOKBACK_HOURS", 24)
-	if err != nil {
-		return audit.VerificationSchedulerConfig{}, err
-	}
-	overlapSeconds, err := parseNonNegativeInt("VERIFICATION_SCHEDULER_OVERLAP_SECONDS", 300)
-	if err != nil {
-		return audit.VerificationSchedulerConfig{}, err
-	}
-	batchSize, err := parsePositiveInt("VERIFICATION_SCHEDULER_BATCH_SIZE", 100)
-	if err != nil {
-		return audit.VerificationSchedulerConfig{}, err
-	}
-	runOnStart, err := parseBool("VERIFICATION_SCHEDULER_RUN_ON_START", false)
-	if err != nil {
-		return audit.VerificationSchedulerConfig{}, err
-	}
-
-	timezone := strings.TrimSpace(os.Getenv("VERIFICATION_SCHEDULER_TIMEZONE"))
-	if timezone == "" {
-		timezone = "UTC"
-	}
-	location, err := time.LoadLocation(timezone)
-	if err != nil {
-		return audit.VerificationSchedulerConfig{}, fmt.Errorf("VERIFICATION_SCHEDULER_TIMEZONE tidak valid: %w", err)
-	}
-
-	return audit.VerificationSchedulerConfig{
-		Enabled:    enabled,
-		ClientID:   strings.TrimSpace(os.Getenv("VERIFICATION_SCHEDULER_CLIENT_ID")),
-		Interval:   time.Duration(intervalSeconds) * time.Second,
-		Lookback:   time.Duration(lookbackHours) * time.Hour,
-		Overlap:    time.Duration(overlapSeconds) * time.Second,
-		BatchSize:  batchSize,
-		Location:   location,
-		RunOnStart: runOnStart,
-	}, nil
-}
-
-func startPipelineWorker(ctx context.Context, db *gorm.DB, fabricSvc *blockchain.FabricService, snapshotBuilder snapshotstore.OutboxBuilder, recoveryCutoff *time.Time, recoveryService *recovery.Service, snapshotRequired bool, kafkaStartOffset string) {
-	hashEngine := &hasher.Engine{DB: db}
-	aggEngine := &aggregator.Engine{DB: db, RecoveryCutoff: recoveryCutoff, SnapshotRequired: &snapshotRequired}
-	kafkaEngine := &kafkaconsumer.Engine{
-		DB:              db,
-		SnapshotBuilder: snapshotBuilder,
-		StartOffset:     kafkaStartOffset,
-	}
-
-	// Ticker pipeline: hasher + aggregator (batch=10) + anchoring setiap 10 detik
-	go func() {
-		log.Println("⚙️  Pipeline Worker mulai berjalan...")
-		ticker := time.NewTicker(10 * time.Second)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				log.Println("⚙️  Pipeline Worker berhenti.")
-				return
-			case <-ticker.C:
-				if err := hashEngine.ProcessPendingLogs(); err != nil {
-					log.Printf("❌ [Hasher] Error: %v\n", err)
-				}
-				if recoveryService != nil {
-					if err := recoveryService.ReconcilePendingCDC(ctx, 100); err != nil {
-						log.Printf("⚠️ [RecoveryCDC] Rekonsiliasi CDC selesai dengan status non-valid: %v\n", err)
-					}
-				}
-				if err := aggEngine.ProcessBatch(10); err != nil {
-					log.Printf("❌ [Aggregator] Error: %v\n", err)
-				}
-				if err := aggEngine.ProcessRecoveryBatch(10); err != nil {
-					log.Printf("❌ [RecoveryAggregator] Error: %v\n", err)
-				}
-				if fabricSvc != nil {
-					if err := fabricSvc.AnchorPendingRoots(); err != nil {
-						log.Printf("❌ [Anchoring] Error: %v\n", err)
-					}
-					if err := fabricSvc.AnchorPendingRecoveryRoots(); err != nil {
-						log.Printf("❌ [RecoveryAnchoring] Error: %v\n", err)
-					}
-					if recoveryService != nil {
-						if err := recoveryService.VerifyReadyEvents(ctx, 100); err != nil {
-							log.Printf("⚠️ [RecoveryVerification] Event auto-verification selesai dengan status non-valid: %v\n", err)
-						}
-					}
-				}
-			}
-		}
-	}()
-
-	// Kafka consumer: satu goroutine per klien aktif
-	go func() {
-		if err := kafkaEngine.Reconcile(ctx); err != nil {
-			log.Printf("⚠️  [KafkaConsumer] Reconcile awal gagal: %v\n", err)
-		}
-		ticker := time.NewTicker(15 * time.Second)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				if err := kafkaEngine.Reconcile(ctx); err != nil {
-					log.Printf("⚠️  [KafkaConsumer] Reconcile gagal: %v\n", err)
-				}
-			}
-		}
-	}()
-}
-
 const (
 	runtimeCommandServe   = "serve"
 	runtimeCommandMigrate = "migrate"
@@ -404,16 +145,6 @@ func main() {
 		return
 	}
 
-	backgroundWorkersEnabled, kafkaStartOffset, workerConfigErr := loadBackgroundWorkersConfig()
-	if workerConfigErr != nil {
-		log.Fatalf("Konfigurasi background worker tidak valid: %v", workerConfigErr)
-	}
-	if backgroundWorkersEnabled {
-		log.Printf("Background workers aktif; Kafka start offset untuk group/partition tanpa checkpoint: %s", kafkaStartOffset)
-	} else {
-		log.Println("Background workers nonaktif; Kafka/pipeline/snapshot/verification/tamper workers otomatis tidak berjalan.")
-	}
-
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
@@ -451,18 +182,6 @@ func main() {
 	if effectiveSnapshotRequired && snapshotBuilder == nil {
 		log.Fatal("❌ SNAPSHOT_REQUIRED_FOR_ANCHOR=true membutuhkan SNAPSHOT_WRITER_ENABLED=true dan konfigurasi MinIO yang valid")
 	}
-	if backgroundWorkersEnabled && snapshotStore != nil {
-		snapshotWorkerConfig, configErr := loadSnapshotWorkerConfig()
-		if configErr != nil {
-			log.Fatalf("❌ Konfigurasi snapshot worker tidak valid: %v", configErr)
-		}
-		worker, workerErr := snapshotworker.New(db, snapshotStore, snapshotWorkerConfig)
-		if workerErr != nil {
-			log.Fatalf("❌ Snapshot worker tidak dapat dibuat: %v", workerErr)
-		}
-		go worker.Run(ctx)
-	}
-
 	fabricSvc, err := blockchain.InitFabricGateway(db)
 	if err != nil {
 		log.Printf("⚠️  Gagal terhubung ke Fabric: %v\n", err)
@@ -478,10 +197,6 @@ func main() {
 	if recoveryEnabled() && recoveryMode == "agent_direct" && fabricSvc == nil {
 		log.Fatal("❌ RECOVERY_MODE=agent_direct membutuhkan koneksi Fabric yang valid")
 	}
-	if backgroundWorkersEnabled && tamperScannerEnabled() && fabricSvc == nil {
-		log.Fatal("❌ TAMPER_SCANNER_ENABLED=true membutuhkan koneksi Fabric yang valid")
-	}
-
 	var recoverySnapshotBuilder snapshotstore.RecoveryEventOutboxBuilder
 	if snapshotCipher != nil {
 		recoverySnapshotBuilder = snapshotstore.RecoveryEventSnapshotOutboxBuilder{Cipher: snapshotCipher}
@@ -492,35 +207,10 @@ func main() {
 	agentService := agentverifier.NewService(db)
 	recoveryService.SetAgentVerifier(agentService)
 
-	if backgroundWorkersEnabled {
-		startPipelineWorker(ctx, db, fabricSvc, snapshotBuilder, recoveryCutoff, recoveryService, effectiveSnapshotRequired, kafkaStartOffset)
-	}
-
 	auditRepo := audit.NewAuditRepository(db)
 	auditService := audit.NewService(auditRepo, fabricSvc, db)
 	verificationJobs := audit.NewVerificationJobService(db, auditService)
-	if backgroundWorkersEnabled {
-		go verificationJobs.Run(ctx)
-		verificationSchedulerConfig, schedulerConfigErr := loadVerificationSchedulerConfig()
-		if schedulerConfigErr != nil {
-			log.Fatalf("Konfigurasi verification scheduler tidak valid: %v", schedulerConfigErr)
-		}
-		verificationScheduler := audit.NewVerificationScheduler(db, verificationJobs, verificationSchedulerConfig)
-		go verificationScheduler.Run(ctx)
-	}
 	auditHandler := audit.NewHandlerWithVerificationJobs(auditService, verificationJobs)
-	if backgroundWorkersEnabled && tamperScannerEnabled() {
-		scannerConfig, configErr := loadTamperScannerConfig(recoveryCutoff)
-		if configErr != nil {
-			log.Fatalf("❌ Konfigurasi tamper scanner tidak valid: %v", configErr)
-		}
-		scanner, scannerErr := tamperscanner.New(db, auditService, scannerConfig)
-		if scannerErr != nil {
-			log.Fatalf("❌ Tamper scanner tidak dapat dibuat: %v", scannerErr)
-		}
-		go scanner.Run(ctx)
-		log.Printf("🔍 Tamper scanner aktif; interval=%s batch=%d concurrency=%d", scannerConfig.Interval, scannerConfig.BatchSize, scannerConfig.Concurrency)
-	}
 
 	authRepo := auth.NewRepository(db)
 	authService := auth.NewService(authRepo)

@@ -16,7 +16,6 @@ import (
 	"go-blockchain-api/internal/blockchain"
 	"go-blockchain-api/internal/blockchain/agentverifier"
 	"go-blockchain-api/internal/engine/hasher"
-	"go-blockchain-api/internal/engine/tamperscanner"
 	"go-blockchain-api/internal/models"
 	"go-blockchain-api/pkg/crypto"
 )
@@ -107,10 +106,6 @@ type RecentLogsResult struct {
 type Service interface {
 	GetDashboardStats(clientID string) (map[string]int64, error)
 	VerifyLogIntegrity(logID, clientID string) (*VerificationResult, error)
-	// VerifyGatewayIntegrity checks only the AuditChain PostgreSQL row against
-	// its local hash and Fabric anchor. It deliberately does not contact the
-	// client database or Agent and is used by the scheduled tamper scanner.
-	VerifyGatewayIntegrity(logID, clientID string) (string, error)
 	GetFabricRecord(anchorID string) (map[string]interface{}, error)
 	VerifyDataIntegrity(resource, clientID string, rawData *map[string]interface{}) (*DataVerificationResult, error)
 
@@ -629,8 +624,8 @@ func (s *auditService) GetDashboardStats(clientID string) (map[string]int64, err
 
 func canonicalizeLog(auditLog *models.AuditLog) {
 	// Metadata TIDAK di-re-marshal. String yang tersimpan di DB adalah
-	// hasil json.Marshal() satu kali saat log pertama ditulis (consumer.go
-	// / normalizer.go), dan itu SUDAH final — re-encode ulang di sini
+	// hasil json.Marshal() satu kali saat log pertama ditulis oleh pipeline CDC
+	// di backend Besu, dan itu SUDAH final — re-encode ulang di sini
 	// tidak dijamin idempotent untuk nilai numerik (int vs float64,
 	// notasi eksponensial pada angka besar, dst), sehingga bisa memicu
 	// false-positive "tampered" meski data tidak pernah berubah.
@@ -716,155 +711,6 @@ func (s *auditService) VerifyLogIntegrity(logID, clientID string) (*Verification
 		}
 	}
 	return result, err
-}
-
-// VerifyGatewayIntegrity is the scanner-safe verification path. It checks
-// only the gateway database row, Merkle proof, and Fabric anchor. Client-side
-// Agent verification is intentionally outside this path.
-func (s *auditService) VerifyGatewayIntegrity(logID, clientID string) (string, error) {
-	auditLog, err := s.repo.GetLogByID(logID, clientID)
-	if err != nil {
-		return models.IntegrityStatusUnreachable, errors.New("log_not_found")
-	}
-	result := s.VerifyGatewayIntegrityBatch([]models.AuditLog{*auditLog})[logID]
-	return result.Status, result.Err
-}
-
-// VerifyGatewayIntegrityBatch verifies a scanner batch while caching Fabric
-// anchor reads by anchor ID. This avoids querying the same Merkle root once
-// per log when a batch contains many siblings from one anchored tree.
-func (s *auditService) VerifyGatewayIntegrityBatch(logs []models.AuditLog) map[string]tamperscanner.BatchVerificationResult {
-	results := make(map[string]tamperscanner.BatchVerificationResult, len(logs))
-	checkedPerClient := make(map[string]int64)
-	type anchorResult struct {
-		root string
-		err  error
-	}
-	anchors := make(map[string]anchorResult)
-
-	for _, input := range logs {
-		auditLog := input
-		checkedPerClient[auditLog.ClientID]++
-		result := tamperscanner.BatchVerificationResult{Status: models.IntegrityStatusUnreachable}
-		if isHashStillPending(&auditLog) {
-			result.Status = models.IntegrityStatusPending
-			results[auditLog.LogID] = result
-			s.persistIntegrityStatus(auditLog.LogID, auditLog.ClientID, result.Status, models.IntegritySourceTamperScanner, "", nil)
-			continue
-		}
-
-		canonicalizeLog(&auditLog)
-		recalculated := hasher.GenerateLogHash(&auditLog)
-		if recalculated != auditLog.HashValue {
-			result.Status = models.IntegrityStatusTampered
-			s.recordTamperIncident(auditLog, "METADATA_HASH_MISMATCH", recalculated)
-			results[auditLog.LogID] = result
-			s.persistIntegrityStatus(auditLog.LogID, auditLog.ClientID, result.Status, models.IntegritySourceTamperScanner, "", nil)
-			continue
-		}
-
-		if auditLog.Status != "ANCHORED" || auditLog.BlockchainTxID == nil || strings.TrimSpace(*auditLog.BlockchainTxID) == "" {
-			result.Status = models.IntegrityStatusPending
-			results[auditLog.LogID] = result
-			s.persistIntegrityStatus(auditLog.LogID, auditLog.ClientID, result.Status, models.IntegritySourceTamperScanner, "", nil)
-			continue
-		}
-		if s.fabric == nil {
-			result.Err = errors.New("fabric_unavailable")
-			results[auditLog.LogID] = result
-			s.persistIntegrityStatus(auditLog.LogID, auditLog.ClientID, result.Status, models.IntegritySourceTamperScanner, "", result.Err)
-			continue
-		}
-
-		anchorID := strings.TrimSpace(*auditLog.BlockchainTxID)
-		anchor, cached := anchors[anchorID]
-		if !cached {
-			anchor = anchorResult{}
-			raw, err := s.fabric.GetAnchorFromLedger(anchorID)
-			if err != nil {
-				anchor.err = fmt.Errorf("fabric_read_failed: %w", err)
-			} else {
-				var fabricResponse struct {
-					MerkleRoot string `json:"merkle_root"`
-				}
-				if err := json.Unmarshal([]byte(raw), &fabricResponse); err != nil || strings.TrimSpace(fabricResponse.MerkleRoot) == "" {
-					if err == nil {
-						err = errors.New("merkle_root kosong")
-					}
-					anchor.err = fmt.Errorf("fabric_anchor_invalid: %w", err)
-				} else {
-					anchor.root = fabricResponse.MerkleRoot
-				}
-			}
-			anchors[anchorID] = anchor
-		}
-		if anchor.err != nil {
-			result.Err = anchor.err
-			results[auditLog.LogID] = result
-			s.persistIntegrityStatus(auditLog.LogID, auditLog.ClientID, result.Status, models.IntegritySourceTamperScanner, "", result.Err)
-			continue
-		}
-
-		if auditLog.MerkleRoot == "" || auditLog.MerkleRoot != anchor.root {
-			result.Status = models.IntegrityStatusTampered
-			s.recordTamperIncident(auditLog, "MERKLE_ROOT_MISMATCH", recalculated)
-			results[auditLog.LogID] = result
-			s.persistIntegrityStatus(auditLog.LogID, auditLog.ClientID, result.Status, models.IntegritySourceTamperScanner, "", nil)
-			continue
-		}
-
-		proofs, err := s.repo.GetProofsByHash(auditLog.HashValue)
-		if err != nil {
-			result.Err = fmt.Errorf("merkle_proof_read_failed: %w", err)
-			results[auditLog.LogID] = result
-			s.persistIntegrityStatus(auditLog.LogID, auditLog.ClientID, result.Status, models.IntegritySourceTamperScanner, "", result.Err)
-			continue
-		}
-		for _, proof := range proofs {
-			if proof.MerkleRoot != "" && proof.MerkleRoot != anchor.root {
-				result.Status = models.IntegrityStatusTampered
-				s.recordTamperIncident(auditLog, "MERKLE_PROOF_MISMATCH", recalculated)
-				break
-			}
-		}
-		if result.Status == models.IntegrityStatusTampered {
-			results[auditLog.LogID] = result
-			s.persistIntegrityStatus(auditLog.LogID, auditLog.ClientID, result.Status, models.IntegritySourceTamperScanner, "", nil)
-			continue
-		}
-
-		reconstructedRoot := auditLog.HashValue
-		if len(proofs) > 0 {
-			reconstructedRoot = crypto.ReconstructMerkleRoot(auditLog.HashValue, toMerkleProofData(proofs))
-		}
-		if reconstructedRoot != anchor.root {
-			result.Status = models.IntegrityStatusTampered
-			s.recordTamperIncident(auditLog, "MERKLE_PROOF_MISMATCH", reconstructedRoot)
-		} else {
-			result.Status = models.IntegrityStatusValid
-		}
-		results[auditLog.LogID] = result
-		s.persistIntegrityStatus(auditLog.LogID, auditLog.ClientID, result.Status, models.IntegritySourceTamperScanner, "", nil)
-	}
-	for clientID, count := range checkedPerClient {
-		s.recordLatestIntegrityCheck(clientID, models.IntegritySourceTamperScanner, "", count)
-	}
-	return results
-}
-
-func integrityStatusModelValue(status string) string {
-	switch status {
-	case "valid":
-		return models.IntegrityStatusValid
-	case "tampered":
-		return models.IntegrityStatusTampered
-	case "pending":
-		return models.IntegrityStatusPending
-	case "unreachable":
-		return models.IntegrityStatusUnreachable
-	default:
-		return models.IntegrityStatusNotChecked
-	}
 }
 
 func (s *auditService) persistIntegrityStatus(logID, clientID, status, integritySource, runID string, verificationErr error) {

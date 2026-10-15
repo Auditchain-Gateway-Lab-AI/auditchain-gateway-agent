@@ -193,8 +193,8 @@ func (s *Service) verifyViaAuditTrail(cfg *models.AgentConfig, auditLog *models.
 
 // verifyViaResource menangani verifikasi untuk log yang membawa Resource
 // berformat "table:id" — ini mencakup SIMRS Morbis maupun Satu Peta, karena
-// keduanya mengisi field Resource dengan format yang sama saat masuk lewat
-// Kafka consumer (lihat kafkaconsumer/consumer.go dan consumer/consumer.go).
+// keduanya mengisi field Resource dengan format yang sama melalui CDC pipeline
+// yang dijalankan backend Besu.
 // Endpoint Agent yang dipanggil: GET /verify/<table>/<id>.
 func (s *Service) verifyViaResource(cfg *models.AgentConfig, auditLog *models.AuditLog) (*VerifyResult, error) {
 	// Parse resource: "nama_tabel:id"
