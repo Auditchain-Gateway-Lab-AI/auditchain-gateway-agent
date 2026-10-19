@@ -5,7 +5,6 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"net/http"
-	"net/url"
 	"strings"
 	"time"
 )
@@ -24,8 +23,13 @@ func NewHandler(service *Service, token string) *Handler {
 	}
 }
 
-// ServeHTTP handles POST /recover/:table/:id and POST /recover.
+// ServeHTTP implements http.Handler for backward compatibility.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	h.HandleRecover(w, r)
+}
+
+// HandleRecover handles POST /recover.
+func (h *Handler) HandleRecover(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -41,73 +45,46 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Extract table and id from URL path if present: /recover/<table>/<id>
-	path := strings.TrimPrefix(r.URL.Path, "/recover")
-	path = strings.TrimPrefix(path, "/")
-
-	var table, recordID string
-	if path != "" {
-		parts := strings.SplitN(path, "/", 2)
-		if len(parts) >= 1 && parts[0] != "" {
-			table, _ = url.PathUnescape(parts[0])
-		}
-		if len(parts) == 2 && parts[1] != "" {
-			recordID, _ = url.PathUnescape(parts[1])
-		}
-	}
-
-	// Decode JSON body
-	var bodyMap map[string]interface{}
+	var req RecoverRequest
 	dec := json.NewDecoder(r.Body)
 	dec.UseNumber()
-	if err := dec.Decode(&bodyMap); err != nil {
+	if err := dec.Decode(&req); err != nil {
 		http.Error(w, "invalid JSON payload: "+err.Error(), http.StatusBadRequest)
 		return
 	}
 
-	// Check if body has wrapper fields { "resource": "TABLE:ID", "data": { ... } } or { "table": "...", "id": "..." }
-	var dataToRecover map[string]interface{}
+	table := strings.TrimSpace(req.Table)
+	recordID := strings.TrimSpace(req.ID)
 
-	if rawResource, ok := bodyMap["resource"].(string); ok && rawResource != "" {
-		resParts := strings.SplitN(rawResource, ":", 2)
-		if len(resParts) == 2 {
-			table = resParts[0]
-			recordID = resParts[1]
-		}
-	}
-	if bTable, ok := bodyMap["table"].(string); ok && bTable != "" {
-		table = bTable
-	}
-	if bID, ok := bodyMap["id"].(string); ok && bID != "" {
-		recordID = bID
-	}
-
-	if wrappedData, ok := bodyMap["data"].(map[string]interface{}); ok && len(wrappedData) > 0 {
-		dataToRecover = wrappedData
-	} else {
-		// Treat the whole body as column map, removing meta fields
-		dataToRecover = make(map[string]interface{}, len(bodyMap))
-		for k, v := range bodyMap {
-			if k != "table" && k != "id" && k != "resource" && k != "data" {
-				dataToRecover[k] = v
+	// If resource is provided (format TABLE:ID), parse table and id
+	if req.Resource != "" {
+		parts := strings.SplitN(strings.TrimSpace(req.Resource), ":", 2)
+		if len(parts) == 2 {
+			table = strings.TrimSpace(parts[0])
+			recordID = strings.TrimSpace(parts[1])
+		} else {
+			slashParts := strings.SplitN(strings.TrimSpace(req.Resource), "/", 2)
+			if len(slashParts) == 2 {
+				table = strings.TrimSpace(slashParts[0])
+				recordID = strings.TrimSpace(slashParts[1])
 			}
 		}
 	}
 
 	if table == "" || recordID == "" {
-		http.Error(w, "table and id must be specified via URL path (/recover/:table/:id) or in JSON body", http.StatusBadRequest)
+		http.Error(w, "table and id (or resource with format TABLE:ID) must be provided in JSON body", http.StatusBadRequest)
 		return
 	}
 
-	if len(dataToRecover) == 0 {
-		http.Error(w, "no data columns provided to recover", http.StatusBadRequest)
+	if len(req.Data) == 0 {
+		http.Error(w, "data object cannot be empty", http.StatusBadRequest)
 		return
 	}
 
 	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
 	defer cancel()
 
-	result, err := h.service.RecoverRow(ctx, table, recordID, dataToRecover)
+	result, err := h.service.RecoverRow(ctx, table, recordID, req.Data)
 	if err != nil {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusInternalServerError)

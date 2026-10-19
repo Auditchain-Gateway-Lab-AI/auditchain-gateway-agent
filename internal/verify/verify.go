@@ -141,30 +141,14 @@ func (s *Server) EnableTableEndpoint(enabled bool) {
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 
-	// Read one current operational resource row.
-	mux.HandleFunc("/verify/", s.handleVerify)
-	// Read one historical source event by its audit_trail ID. This is separate
-	// from /verify/:table/:id, which reads the current operational row.
-	mux.HandleFunc("/verify-audit/", s.handleVerifyAudit)
-	mux.HandleFunc("/verify-audit-lookup", s.handleLookupAuditTrail)
+	RegisterRoutes(mux, s)
 
-	// Endpoint baru — resource geospasial (untuk Satu Peta)
-	// Format: GET /verify-resource/<table>/<id>
-	mux.HandleFunc("/verify-resource/", s.handleVerifyResource)
-
-	if s.tableEndpointEnabled {
-		mux.HandleFunc("/table/", s.handleTable)
-	} else {
-		mux.HandleFunc("/table/", func(w http.ResponseWriter, r *http.Request) {
-			http.Error(w, "table endpoint disabled", http.StatusNotFound)
-		})
-	}
-	mux.HandleFunc("/health", s.handleHealth)
-	mux.HandleFunc("/readyz", s.handleReady)
 	if s.recoveryHandler != nil {
+		mux.Handle("/recover", s.recoveryHandler)
 		mux.Handle("/recover/", s.recoveryHandler)
 	}
 	if s.auditHandler != nil {
+		mux.Handle("/audit", s.auditHandler)
 		mux.Handle("/audit/", s.auditHandler)
 	}
 	if s.metricsHandler != nil {

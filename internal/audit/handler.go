@@ -25,32 +25,30 @@ func NewHandler(service *Service, token string) *Handler {
 	}
 }
 
-// ServeHTTP routes incoming requests to the appropriate handler.
+// ServeHTTP implements http.Handler for backward compatibility.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if !h.authorized(r) {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
-		return
-	}
-
 	path := strings.TrimPrefix(r.URL.Path, "/audit")
 	path = strings.TrimPrefix(path, "/")
 
 	switch {
 	case path == "run":
-		h.handleRun(w, r)
+		h.HandleRun(w, r)
 	case strings.HasPrefix(path, "resource/"):
-		resource := strings.TrimPrefix(path, "resource/")
-		h.handleAuditResource(w, r, resource)
+		h.HandleAuditResource(w, r)
 	case path == "health":
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok", "module": "audit"})
+		h.HandleHealth(w, r)
 	default:
 		http.NotFound(w, r)
 	}
 }
 
-func (h *Handler) handleRun(w http.ResponseWriter, r *http.Request) {
+// HandleRun handles POST /audit/run and GET /audit/run.
+func (h *Handler) HandleRun(w http.ResponseWriter, r *http.Request) {
+	if !h.authorized(r) {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
 	var fromStr, toStr, resource string
 	var autoRecover bool
 
@@ -116,15 +114,23 @@ func (h *Handler) handleRun(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, report)
 }
 
-func (h *Handler) handleAuditResource(w http.ResponseWriter, r *http.Request, rawResource string) {
+// HandleAuditResource handles GET /audit/resource/:resource.
+func (h *Handler) HandleAuditResource(w http.ResponseWriter, r *http.Request) {
+	if !h.authorized(r) {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
 	if r.Method != http.MethodGet && r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
+	rawResource := strings.TrimPrefix(r.URL.Path, "/audit/resource/")
+	rawResource = strings.TrimPrefix(rawResource, "/")
 	resource, err := url.PathUnescape(rawResource)
 	if err != nil || resource == "" {
-		http.Error(w, "invalid resource", http.StatusBadRequest)
+		http.Error(w, "invalid resource in path", http.StatusBadRequest)
 		return
 	}
 
@@ -143,6 +149,11 @@ func (h *Handler) handleAuditResource(w http.ResponseWriter, r *http.Request, ra
 	}
 
 	writeJSON(w, http.StatusOK, res)
+}
+
+// HandleHealth handles GET /audit/health.
+func (h *Handler) HandleHealth(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "module": "audit"})
 }
 
 func (h *Handler) authorized(r *http.Request) bool {
