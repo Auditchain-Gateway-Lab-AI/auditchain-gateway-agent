@@ -1,220 +1,140 @@
-package recovery
+﻿package recovery
 
 import (
 	"context"
 	"crypto/subtle"
 	"encoding/json"
-	"errors"
-	"net"
 	"net/http"
 	"net/url"
 	"strings"
-	"sync"
 	"time"
 )
 
-type HTTPConfig struct {
-	Enabled            bool
-	Token              string
-	MaxBodyBytes       int64
-	RequestTimeout     time.Duration
-	RateLimitPerMinute int
-}
-
+// Handler serves the HTTP recovery endpoint.
 type Handler struct {
 	service *Service
-	cfg     HTTPConfig
-	now     func() time.Time
-	limiter *ipRateLimiter
+	token   string
 }
 
-func NewHandler(service *Service, cfg HTTPConfig) *Handler {
-	if cfg.RateLimitPerMinute <= 0 {
-		cfg.RateLimitPerMinute = 60
+// NewHandler creates a new HTTP Handler for recovery.
+func NewHandler(service *Service, token string) *Handler {
+	return &Handler{
+		service: service,
+		token:   token,
 	}
-	return &Handler{service: service, cfg: cfg, now: time.Now, limiter: newIPRateLimiter(cfg.RateLimitPerMinute)}
 }
 
+// ServeHTTP handles POST /recover/:table/:id and POST /recover.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		writeAPIError(w, http.StatusMethodNotAllowed, newAPIError("invalid_payload", "method not allowed"))
-		return
-	}
-	if !h.cfg.Enabled {
-		writeAPIError(w, http.StatusForbidden, newAPIError("recovery_disabled", "recovery is disabled"))
-		return
-	}
-	if h.limiter != nil && !h.limiter.Allow(clientIP(r)) {
-		writeAPIError(w, http.StatusTooManyRequests, newAPIError("rate_limited", "recovery request rate limit exceeded"))
-		return
-	}
-	if !validBearer(r.Header.Get("Authorization"), h.cfg.Token) {
-		writeAPIError(w, http.StatusUnauthorized, newAPIError("invalid_agent_token", "recovery token is invalid"))
-		return
-	}
-	if h.cfg.MaxBodyBytes <= 0 {
-		writeAPIError(w, http.StatusForbidden, newAPIError("recovery_disabled", "recovery is not configured"))
-		return
-	}
-	tableName, recordID, ok := parsePath(r.URL.Path)
-	if !ok {
-		writeAPIError(w, http.StatusBadRequest, newAPIError("invalid_payload", "path must be /recover/:table/:record_id"))
-		return
-	}
-	if contentType := r.Header.Get("Content-Type"); contentType != "" && !strings.HasPrefix(strings.ToLower(contentType), "application/json") {
-		writeAPIError(w, http.StatusBadRequest, newAPIError("invalid_payload", "content type must be application/json"))
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
-	r.Body = http.MaxBytesReader(w, r.Body, h.cfg.MaxBodyBytes)
-	decoder := json.NewDecoder(r.Body)
-	decoder.UseNumber()
-	request, err := decodeRequest(decoder)
-	if err != nil {
-		var tooLarge *http.MaxBytesError
-		if errors.As(err, &tooLarge) {
-			writeAPIError(w, http.StatusRequestEntityTooLarge, newAPIError("invalid_payload", "request body is too large"))
-			return
-		}
-		apiErr := asAPIError(err)
-		if apiErr == nil {
-			apiErr = newAPIError("invalid_payload", "request body is invalid")
-		}
-		writeAPIError(w, http.StatusBadRequest, apiErr)
+	if !h.authorized(r) {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
 
-	timeout := h.cfg.RequestTimeout
-	if timeout <= 0 {
-		timeout = 15 * time.Second
+	if h.service == nil {
+		http.Error(w, "recovery service is disabled or unconfigured", http.StatusServiceUnavailable)
+		return
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), timeout)
+
+	// Extract table and id from URL path if present: /recover/<table>/<id>
+	path := strings.TrimPrefix(r.URL.Path, "/recover")
+	path = strings.TrimPrefix(path, "/")
+
+	var table, recordID string
+	if path != "" {
+		parts := strings.SplitN(path, "/", 2)
+		if len(parts) >= 1 && parts[0] != "" {
+			table, _ = url.PathUnescape(parts[0])
+		}
+		if len(parts) == 2 && parts[1] != "" {
+			recordID, _ = url.PathUnescape(parts[1])
+		}
+	}
+
+	// Decode JSON body
+	var bodyMap map[string]interface{}
+	dec := json.NewDecoder(r.Body)
+	dec.UseNumber()
+	if err := dec.Decode(&bodyMap); err != nil {
+		http.Error(w, "invalid JSON payload: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	// Check if body has wrapper fields { "resource": "TABLE:ID", "data": { ... } } or { "table": "...", "id": "..." }
+	var dataToRecover map[string]interface{}
+
+	if rawResource, ok := bodyMap["resource"].(string); ok && rawResource != "" {
+		resParts := strings.SplitN(rawResource, ":", 2)
+		if len(resParts) == 2 {
+			table = resParts[0]
+			recordID = resParts[1]
+		}
+	}
+	if bTable, ok := bodyMap["table"].(string); ok && bTable != "" {
+		table = bTable
+	}
+	if bID, ok := bodyMap["id"].(string); ok && bID != "" {
+		recordID = bID
+	}
+
+	if wrappedData, ok := bodyMap["data"].(map[string]interface{}); ok && len(wrappedData) > 0 {
+		dataToRecover = wrappedData
+	} else {
+		// Treat the whole body as column map, removing meta fields
+		dataToRecover = make(map[string]interface{}, len(bodyMap))
+		for k, v := range bodyMap {
+			if k != "table" && k != "id" && k != "resource" && k != "data" {
+				dataToRecover[k] = v
+			}
+		}
+	}
+
+	if table == "" || recordID == "" {
+		http.Error(w, "table and id must be specified via URL path (/recover/:table/:id) or in JSON body", http.StatusBadRequest)
+		return
+	}
+
+	if len(dataToRecover) == 0 {
+		http.Error(w, "no data columns provided to recover", http.StatusBadRequest)
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
 	defer cancel()
-	response, err := h.service.Execute(ctx, tableName, recordID, request)
+
+	result, err := h.service.RecoverRow(ctx, table, recordID, dataToRecover)
 	if err != nil {
-		writeServiceError(w, err)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"status":  "FAILED",
+			"table":   table,
+			"id":      recordID,
+			"error":   err.Error(),
+			"message": "failed to recover row",
+		})
 		return
 	}
-	writeJSON(w, http.StatusOK, response)
-}
 
-func validBearer(header, expected string) bool {
-	prefix := "Bearer "
-	if expected == "" || len(header) != len(prefix)+len(expected) || !strings.HasPrefix(header, prefix) {
-		return false
-	}
-	return subtle.ConstantTimeCompare([]byte(header[len(prefix):]), []byte(expected)) == 1
-}
-
-func parsePath(path string) (string, string, bool) {
-	if !strings.HasPrefix(path, "/recover/") {
-		return "", "", false
-	}
-	parts := strings.Split(strings.TrimPrefix(path, "/recover/"), "/")
-	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
-		return "", "", false
-	}
-	table, err := url.PathUnescape(parts[0])
-	if err != nil {
-		return "", "", false
-	}
-	recordID, err := url.PathUnescape(parts[1])
-	if err != nil || strings.Contains(table, "/") || strings.Contains(recordID, "/") || len(recordID) > 256 {
-		return "", "", false
-	}
-	return table, recordID, true
-}
-
-func writeServiceError(w http.ResponseWriter, err error) {
-	if apiErr := asAPIError(err); apiErr != nil {
-		status := statusForCode(apiErr.Code)
-		writeAPIError(w, status, apiErr)
-		return
-	}
-	writeAPIError(w, http.StatusInternalServerError, newAPIError("write_rejected", "recovery request could not be processed"))
-}
-
-func statusForCode(code string) int {
-	switch code {
-	case "invalid_payload", "desired_state_invalid":
-		return http.StatusBadRequest
-	case "invalid_agent_token":
-		return http.StatusUnauthorized
-	case "recovery_disabled", "table_not_allowed", "column_not_allowed":
-		if code == "recovery_disabled" {
-			return http.StatusForbidden
-		}
-		return http.StatusForbidden
-	case "resource_mapping_not_found":
-		return http.StatusNotFound
-	case "source_state_changed", "idempotency_conflict", "command_in_progress":
-		return http.StatusConflict
-	case "write_rejected":
-		return http.StatusUnprocessableEntity
-	case "database_unreachable", "execution_outcome_unknown":
-		return http.StatusServiceUnavailable
-	case "rate_limited":
-		return http.StatusTooManyRequests
-	case "readback_mismatch", "idempotency_store_failed":
-		return http.StatusInternalServerError
-	default:
-		return http.StatusInternalServerError
-	}
-}
-
-func writeAPIError(w http.ResponseWriter, status int, apiErr *APIError) {
-	writeJSON(w, status, apiErr)
-}
-
-func writeJSON(w http.ResponseWriter, status int, value any) {
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(value)
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(result)
 }
 
-type ipRateLimiter struct {
-	mu      sync.Mutex
-	window  time.Duration
-	limit   int
-	clients map[string]rateEntry
-}
-
-type rateEntry struct {
-	started time.Time
-	count   int
-}
-
-func newIPRateLimiter(limit int) *ipRateLimiter {
-	return &ipRateLimiter{window: time.Minute, limit: limit, clients: make(map[string]rateEntry)}
-}
-
-func (l *ipRateLimiter) Allow(client string) bool {
-	now := time.Now()
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	entry, ok := l.clients[client]
-	if !ok || now.Sub(entry.started) >= l.window {
-		if len(l.clients) >= 4096 {
-			l.clients = make(map[string]rateEntry)
-		}
-		l.clients[client] = rateEntry{started: now, count: 1}
+func (h *Handler) authorized(r *http.Request) bool {
+	if h.token == "" {
 		return true
 	}
-	if entry.count >= l.limit {
+	authHeader := r.Header.Get("Authorization")
+	const prefix = "Bearer "
+	if !strings.HasPrefix(authHeader, prefix) {
 		return false
 	}
-	entry.count++
-	l.clients[client] = entry
-	return true
-}
-
-func clientIP(r *http.Request) string {
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err == nil && host != "" {
-		return host
-	}
-	if r.RemoteAddr != "" {
-		return r.RemoteAddr
-	}
-	return "unknown"
+	token := authHeader[len(prefix):]
+	return subtle.ConstantTimeCompare([]byte(token), []byte(h.token)) == 1
 }

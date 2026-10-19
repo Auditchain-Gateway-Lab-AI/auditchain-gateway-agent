@@ -2,14 +2,11 @@
 
 import (
 	"context"
-	"crypto/rand"
-	"crypto/sha256"
 	"fmt"
 	"log"
 	"strings"
 	"time"
 
-	"auditchain-agent/internal/canonicalstate"
 	"auditchain-agent/internal/recovery"
 	"auditchain-agent/internal/verify"
 )
@@ -21,7 +18,7 @@ type ResourceReader interface {
 
 // RecoveryExecutor can apply clean state to the client database.
 type RecoveryExecutor interface {
-	Execute(ctx context.Context, tableName, recordID string, request recovery.RecoveryRequest) (recovery.RecoveryResponse, error)
+	RecoverRow(ctx context.Context, tableName, recordID string, data map[string]interface{}) (*recovery.RecoverResult, error)
 }
 
 // ServiceConfig holds parameters for the audit service.
@@ -246,7 +243,7 @@ func (s *Service) AuditSingleLog(ctx context.Context, logEntry OffchainLog, auto
 
 		// Optional Recovery
 		if (autoRecover || s.cfg.AutoRecover) && s.recoveryExecutor != nil {
-			recovered, recErr := s.triggerRecovery(ctx, tableName, recordID, clientID, clientHash, logEntry)
+			recovered, recErr := s.triggerRecovery(ctx, tableName, recordID, logEntry)
 			result.AutoRecovered = recovered
 			if recErr != nil {
 				result.RecoveryError = recErr.Error()
@@ -279,82 +276,21 @@ func (s *Service) AuditSingleLog(ctx context.Context, logEntry OffchainLog, auto
 	return result
 }
 
-func (s *Service) triggerRecovery(ctx context.Context, tableName, recordID, clientID, currentClientHash string, logEntry OffchainLog) (bool, error) {
+func (s *Service) triggerRecovery(ctx context.Context, tableName, recordID string, logEntry OffchainLog) (bool, error) {
 	desiredState, err := ExtractOffchainState(logEntry.Metadata)
 	if err != nil {
 		return false, fmt.Errorf("extract clean state for recovery: %w", err)
 	}
 
-	op := recovery.OperationUpsert
-	if strings.EqualFold(strings.TrimSpace(logEntry.Action), "DELETE") {
-		op = recovery.OperationDelete
-		desiredState = nil
-	}
-
-	desiredStateHash, _, err := canonicalstate.HashState(clientID, logEntry.Resource, desiredState)
+	log.Printf("[AuditService] Memulai auto-recovery untuk %s:%s", tableName, recordID)
+	res, err := s.recoveryExecutor.RecoverRow(ctx, tableName, recordID, desiredState)
 	if err != nil {
-		return false, fmt.Errorf("hash desired state for recovery: %w", err)
-	}
-
-	beforeHash := currentClientHash
-	if len(beforeHash) != 64 {
-		h := sha256.Sum256([]byte(beforeHash))
-		beforeHash = fmt.Sprintf("%x", h[:])
-	}
-
-	auditLeafHash := logEntry.HashValue
-	if len(auditLeafHash) != 64 {
-		h := sha256.Sum256([]byte(auditLeafHash))
-		auditLeafHash = fmt.Sprintf("%x", h[:])
-	}
-
-	merkleRoot := logEntry.MerkleRoot
-	if len(merkleRoot) != 64 {
-		h := sha256.Sum256([]byte(merkleRoot))
-		merkleRoot = fmt.Sprintf("%x", h[:])
-	}
-
-	anchorID := "manual-audit"
-	if logEntry.BlockchainTxID != nil && *logEntry.BlockchainTxID != "" {
-		anchorID = *logEntry.BlockchainTxID
-	}
-
-	idempotencyKey := fmt.Sprintf("audit-recovery-%s-%d", logEntry.LogID, time.Now().UnixNano())
-	keyHash := sha256.Sum256([]byte(idempotencyKey))
-
-	req := recovery.RecoveryRequest{
-		RequestID:          generateUUID(),
-		IdempotencyKey:     fmt.Sprintf("%x", keyHash),
-		Operation:          op,
-		ExpectedBeforeHash: beforeHash,
-		DesiredStateHash:   desiredStateHash,
-		DesiredState:       desiredState,
-		Reference: recovery.Reference{
-			LogID:         logEntry.LogID,
-			AuditLeafHash: auditLeafHash,
-			MerkleRoot:    merkleRoot,
-			AnchorID:      anchorID,
-		},
-		IssuedAt: time.Now(),
-	}
-
-	log.Printf("[AuditService] Memulai recovery untuk %s:%s (op=%s, req_id=%s)", tableName, recordID, op, req.RequestID)
-	resp, err := s.recoveryExecutor.Execute(ctx, tableName, recordID, req)
-	if err != nil {
-		log.Printf("[AuditService] Gagal recovery %s:%s: %v", tableName, recordID, err)
+		log.Printf("[AuditService] Gagal auto-recovery %s:%s: %v", tableName, recordID, err)
 		return false, err
 	}
 
-	log.Printf("[AuditService] Recovery sukses untuk %s:%s (applied=%t, idempotent_replay=%t)", tableName, recordID, resp.Applied, resp.IdempotentReplay)
-	return resp.Applied || resp.IdempotentReplay, nil
-}
-
-func generateUUID() string {
-	var b [16]byte
-	_, _ = rand.Read(b[:])
-	b[6] = (b[6] & 0x0f) | 0x40 // Version 4
-	b[8] = (b[8] & 0x3f) | 0x80 // Variant RFC 4122
-	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
+	log.Printf("[AuditService] Auto-recovery sukses untuk %s:%s (op=%s, cols=%v)", tableName, recordID, res.Operation, res.RecoveredColumns)
+	return true, nil
 }
 
 func parseResource(resource string) (tableName, recordID string, err error) {

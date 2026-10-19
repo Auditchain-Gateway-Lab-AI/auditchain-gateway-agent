@@ -1,4 +1,4 @@
-package main
+﻿package main
 
 import (
 	"context"
@@ -32,8 +32,6 @@ func main() {
 
 	log.Println("✅ Konfigurasi berhasil dimuat")
 	log.Printf("   Gateway     : %s", cfg.Gateway.URL)
-	log.Printf("   Kafka       : %s", cfg.Kafka.Brokers)
-	log.Printf("   Topic prefix: %s", cfg.Kafka.TopicPrefix)
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
@@ -88,53 +86,18 @@ func main() {
 	verifyServer.SetReadProjection(verifyPolicy.ReadMapping)
 	log.Printf("✅ Verify read policy dimuat (%d tabel)", verifyPolicy.TableCount())
 
-	var recoveryPolicy *recovery.PolicySet
+	// Modul Recovery (Single-row client restoration)
 	var recoveryService *recovery.Service
 	if cfg.Recovery.Enabled {
-		recoveryPolicy, err = recovery.LoadPolicy(cfg.Recovery.PolicyPath)
-		if err != nil {
-			log.Fatalf("❌ Gagal load recovery policy: %v", err)
+		recoveryService = recovery.NewService(db)
+		if verifyPolicy != nil {
+			recoveryService.SetReadProjection(verifyPolicy.ReadMapping)
 		}
-		policyHash, hashErr := recoveryPolicy.PolicyHash()
-		if hashErr != nil {
-			log.Fatalf("❌ Gagal menghitung hash recovery policy: %v", hashErr)
-		}
-		log.Printf("✅ Recovery policy dimuat (hash=%s)", policyHash[:16])
-
-		stateStore, storeErr := recovery.OpenIdempotencyStore(cfg.Recovery.StatePath)
-		if storeErr != nil {
-			log.Fatalf("❌ Gagal membuka recovery state store: %v", storeErr)
-		}
-		repository := recovery.NewOracleRepository(db, cfg.Recovery.ClientID)
-		recoveryService = recovery.NewService(recovery.ServiceConfig{
-			Enabled:      cfg.Recovery.Enabled,
-			ClientID:     cfg.Recovery.ClientID,
-			MaxColumns:   cfg.Recovery.MaxColumns,
-			MaxClockSkew: time.Duration(cfg.Recovery.MaxClockSkewSeconds) * time.Second,
-			Retention:    time.Duration(cfg.Recovery.RetentionDays) * 24 * time.Hour,
-		}, recoveryPolicy, repository, stateStore)
-		verifyServer.SetRecoveryHandler(recovery.NewHandler(recoveryService, recovery.HTTPConfig{
-			Enabled:        cfg.Recovery.Enabled,
-			Token:          cfg.Recovery.Token,
-			MaxBodyBytes:   cfg.Recovery.MaxBodyBytes,
-			RequestTimeout: time.Duration(cfg.Recovery.RequestTimeoutSeconds) * time.Second,
-		}))
-		verifyServer.SetMetricsHandler(recoveryService.MetricsHandler())
+		verifyServer.SetRecoveryHandler(recovery.NewHandler(recoveryService, verifyToken))
+		log.Println("✅ Modul Recovery aktif di endpoint /recover/")
 	} else {
-		// Keep the route visible for operators while making the safe default
-		// explicit. No recovery service or state store is opened in this mode.
-		verifyServer.SetRecoveryHandler(recovery.NewHandler(nil, recovery.HTTPConfig{
-			Enabled:      false,
-			MaxBodyBytes: cfg.Recovery.MaxBodyBytes,
-		}))
+		verifyServer.SetRecoveryHandler(recovery.NewHandler(nil, verifyToken))
 	}
-
-	if cfg.Recovery.Enabled {
-		log.Println("🚀 AuditChain Agent mulai berjalan (verify + recovery pilot aktif)")
-	} else {
-		log.Println("🚀 AuditChain Agent mulai berjalan (recovery disabled)")
-	}
-
 
 	// Inisialisasi Modul Audit (Outbound Verification)
 	gatewayClient := audit.NewGatewayClient(
@@ -160,7 +123,7 @@ func main() {
 
 	auditHandler := audit.NewHandler(auditService, verifyToken)
 	verifyServer.SetAuditHandler(auditHandler)
-	log.Println("Modul Audit (Outbound Verification) aktif di /audit/")
+	log.Println("✅ Modul Audit (Outbound Verification) aktif di /audit/")
 
 	if cfg.Audit.Enabled {
 		auditRunner := audit.NewRunner(audit.RunnerConfig{
@@ -171,6 +134,8 @@ func main() {
 		}, auditService)
 		go auditRunner.Start(ctx)
 	}
+
+	log.Println("🚀 AuditChain Agent siap melayani request")
 
 	serverErr := make(chan error, 1)
 	go func() { serverErr <- verifyServer.Run(ctx) }()
