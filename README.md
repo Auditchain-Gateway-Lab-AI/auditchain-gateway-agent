@@ -24,6 +24,17 @@ Agent tidak mengirim callback final recovery ke Gateway.
 - `AGENT_RECOVERY_TOKEN`, `AGENT_CLIENT_ID`, dan policy lokal hanya bila
   recovery pilot diaktifkan
 
+Gateway juga menggunakan read-only `GET /verify-audit/:audit_trail_id` untuk
+membaca event asli dari tabel historis client (default `AUDIT_TRAIL`). Endpoint
+ini terpisah dari `GET /verify/:table/:id`, yang membaca row operasional saat
+ini. Gateway dapat memakai event historis tersebut untuk memperbaiki metadata
+audit log tanpa MinIO setelah hash, Merkle proof, dan Fabric anchor cocok.
+Untuk log lama yang belum menyimpan ID sumber, Gateway meminta kandidat terbatas
+melalui `GET /verify-audit-lookup?table=...&operation=...&primary_key=...&record_id=...&at=...`;
+pencarian dibatasi ke tabel, operasi, primary key, dan jendela waktu lima menit. Kandidat tidak dapat
+dipakai untuk recovery sebelum Gateway mencocokkan data dengan hash dan proof
+yang sudah di-anchor.
+
 ## Konfigurasi
 
 Salin dan sesuaikan `config.yml` serta environment. `config.yml` hanya
@@ -36,9 +47,15 @@ tables:
     source_system: SIMRS-Pasien
 ```
 
-Untuk recovery, copy `recovery-policy.example.yml` menjadi policy lokal yang
-sudah direview. Policy harus exact dan tidak boleh memuat credential, password,
-token, secret, binary, LOB, generated, atau virtual column.
+Verifikasi baris sumber memakai allowlist baca-saja verify-policy.yml.
+Salin verify-policy.example.yml sebagai awal konfigurasi; setiap mapping harus
+menentukan schema, tabel, primary key, dan kolom state yang sudah dikonfirmasi
+di Oracle. Tabel yang tidak tercantum ditolak (fail-closed). Atur lokasinya
+dengan AGENT_VERIFY_POLICY_PATH.
+
+Recovery memakai recovery-policy.yml yang terpisah. Izin membaca tabel tidak
+memberi izin UPSERT/DELETE; recovery tetap disabled secara default dan hanya
+berjalan untuk tabel/kolom/operasi yang diizinkan policy recovery.
 
 ## Menjalankan
 

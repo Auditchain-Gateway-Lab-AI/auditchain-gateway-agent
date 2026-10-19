@@ -18,8 +18,10 @@ import (
 var identifierPattern = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*$`)
 
 var (
-	errVerifyDatabase  = errors.New("verify database unavailable")
-	errVerifyForbidden = errors.New("verify table not allowed")
+	errVerifyDatabase            = errors.New("verify database unavailable")
+	errVerifyForbidden           = errors.New("verify table not allowed")
+	errAuditTrailProjectionMiss  = errors.New("audit trail table not found")
+	errAuditTrailCandidateLookup = errors.New("audit trail candidate lookup failed")
 )
 
 type ReadProjection struct {
@@ -27,6 +29,49 @@ type ReadProjection struct {
 	Table        string
 	PrimaryKey   string
 	StateColumns []string
+}
+
+// AuditTrailProjection describes the single source-side history table exposed
+// by /verify-audit. Request parameters can select only a record ID; they can
+// never select a schema, table, or column.
+type AuditTrailProjection struct {
+	Schema string
+	Table  string
+}
+
+type AuditTrailLookupRequest struct {
+	Table       string
+	Operation   string
+	PrimaryKey  string
+	RecordID    string
+	At          time.Time
+	Window      time.Duration
+	RecordLimit int
+}
+
+type AuditTrailLookupResult struct {
+	Records   []AuditTrailRecord `json:"records"`
+	Truncated bool               `json:"truncated"`
+}
+
+const (
+	maxAuditTrailLookupWindow = 5 * time.Minute
+	maxAuditTrailLookupRows   = 50
+)
+
+// AuditTrailRecord is the immutable source event used to reconstruct a
+// tampered Gateway audit-log payload. Field names match the SIMRS audit_trail
+// contract consumed by the Gateway.
+type AuditTrailRecord struct {
+	Found    bool                   `json:"found"`
+	ID       string                 `json:"id"`
+	Tabel    string                 `json:"tabel"`
+	Operasi  string                 `json:"operasi"`
+	DBUser   string                 `json:"db_user"`
+	AppUser  *string                `json:"app_user"`
+	DataLama map[string]interface{} `json:"data_lama"`
+	DataBaru map[string]interface{} `json:"data_baru"`
+	Waktu    time.Time              `json:"waktu"`
 }
 
 // ResourceRecord adalah data yang dikembalikan ke Gateway saat verifikasi.
@@ -46,12 +91,16 @@ type Server struct {
 	recoveryHandler      http.Handler
 	metricsHandler       http.Handler
 	readProjection       func(string) (ReadProjection, bool)
+	auditTrailProjection AuditTrailProjection
 	tableEndpointEnabled bool
 	maxResponseBytes     int64
 }
 
 func NewServer(db *sql.DB, verifyToken, port string) *Server {
-	return &Server{db: db, verifyToken: verifyToken, port: port, maxResponseBytes: 1024 * 1024}
+	return &Server{
+		db: db, verifyToken: verifyToken, port: port, maxResponseBytes: 1024 * 1024,
+		auditTrailProjection: AuditTrailProjection{Table: "AUDIT_TRAIL"},
+	}
 }
 
 func (s *Server) SetRecoveryHandler(handler http.Handler) {
@@ -66,6 +115,15 @@ func (s *Server) SetReadProjection(lookup func(string) (ReadProjection, bool)) {
 	s.readProjection = lookup
 }
 
+func (s *Server) SetAuditTrailProjection(projection AuditTrailProjection) {
+	projection.Schema = strings.ToUpper(strings.TrimSpace(projection.Schema))
+	projection.Table = strings.ToUpper(strings.TrimSpace(projection.Table))
+	if strings.TrimSpace(projection.Table) == "" {
+		projection.Table = "AUDIT_TRAIL"
+	}
+	s.auditTrailProjection = projection
+}
+
 func (s *Server) EnableTableEndpoint(enabled bool) {
 	s.tableEndpointEnabled = enabled
 }
@@ -73,8 +131,12 @@ func (s *Server) EnableTableEndpoint(enabled bool) {
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 
-	// Endpoint lama — audit_trail (untuk SIMRS)
+	// Read one current operational resource row.
 	mux.HandleFunc("/verify/", s.handleVerify)
+	// Read one historical source event by its audit_trail ID. This is separate
+	// from /verify/:table/:id, which reads the current operational row.
+	mux.HandleFunc("/verify-audit/", s.handleVerifyAudit)
+	mux.HandleFunc("/verify-audit-lookup", s.handleLookupAuditTrail)
 
 	// Endpoint baru — resource geospasial (untuk Satu Peta)
 	// Format: GET /verify-resource/<table>/<id>
@@ -450,6 +512,312 @@ func (s *Server) handleVerify(w http.ResponseWriter, r *http.Request) {
 	s.writeJSON(w, http.StatusOK, rec)
 }
 
+// handleVerifyAudit serves GET /verify-audit/<audit_trail_id>.
+func (s *Server) handleVerifyAudit(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !s.authorized(r) {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	recordID := strings.TrimPrefix(r.URL.Path, "/verify-audit/")
+	if recordID == "" || strings.Contains(recordID, "/") || len(recordID) > 256 {
+		http.Error(w, "format path harus /verify-audit/<audit_trail_id>", http.StatusBadRequest)
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+	defer cancel()
+	record, err := s.queryAuditTrail(ctx, recordID)
+	if err != nil {
+		s.writeQueryError(w, err)
+		return
+	}
+	s.writeJSON(w, http.StatusOK, record)
+}
+
+func (s *Server) queryAuditTrail(ctx context.Context, recordID string) (AuditTrailRecord, error) {
+	if s.db == nil {
+		return AuditTrailRecord{}, errVerifyDatabase
+	}
+	projection := s.auditTrailProjection
+	if !IsValidSQLIdentifier(projection.Table) {
+		return AuditTrailRecord{}, errVerifyForbidden
+	}
+	owner := strings.TrimSpace(projection.Schema)
+	if owner != "" && !IsValidSQLIdentifier(owner) {
+		return AuditTrailRecord{}, errVerifyForbidden
+	}
+	actualTable := projection.Table
+	if owner == "" {
+		err := s.db.QueryRowContext(ctx, `
+			SELECT owner, table_name
+			FROM (
+				SELECT owner, table_name
+				FROM all_tables
+				WHERE UPPER(table_name) = UPPER(:1)
+				ORDER BY CASE WHEN owner = USER THEN 0 ELSE 1 END, owner
+			)
+			WHERE rownum = 1
+		`, projection.Table).Scan(&owner, &actualTable)
+		if errors.Is(err, sql.ErrNoRows) {
+			return AuditTrailRecord{}, errVerifyDatabase
+		}
+		if err != nil {
+			return AuditTrailRecord{}, errVerifyDatabase
+		}
+	}
+	if !IsValidSQLIdentifier(owner) || !IsValidSQLIdentifier(actualTable) {
+		return AuditTrailRecord{}, errVerifyForbidden
+	}
+
+	// The projection is fixed to the known SIMRS audit_trail columns. Table and
+	// owner are validated identifiers from local Agent configuration.
+	query := fmt.Sprintf(`
+		SELECT "ID", "TABEL", "OPERASI", "DB_USER", "APP_USER", "DATA_LAMA", "DATA_BARU", "WAKTU"
+		FROM "%s"."%s"
+		WHERE "ID" = :1 AND ROWNUM <= 1
+	`, owner, actualTable)
+	var id, tableName, operation, dbUser sql.NullString
+	var appUser, oldJSON, newJSON sql.NullString
+	var eventTime sql.NullTime
+	err := s.db.QueryRowContext(ctx, query, recordID).Scan(
+		&id, &tableName, &operation, &dbUser, &appUser, &oldJSON, &newJSON, &eventTime,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return AuditTrailRecord{Found: false, ID: recordID}, nil
+	}
+	if err != nil {
+		log.Printf("[VerifyServer] Gagal membaca audit_trail id=%q: %v", recordID, err)
+		return AuditTrailRecord{}, errVerifyDatabase
+	}
+	dataLama, err := decodeAuditImage(oldJSON)
+	if err != nil {
+		return AuditTrailRecord{}, errVerifyDatabase
+	}
+	dataBaru, err := decodeAuditImage(newJSON)
+	if err != nil {
+		return AuditTrailRecord{}, errVerifyDatabase
+	}
+	result := AuditTrailRecord{
+		Found: true, ID: id.String, Tabel: tableName.String, Operasi: operation.String,
+		DBUser: dbUser.String, DataLama: dataLama, DataBaru: dataBaru,
+	}
+	if appUser.Valid {
+		value := appUser.String
+		result.AppUser = &value
+	}
+	if eventTime.Valid {
+		result.Waktu = eventTime.Time
+	}
+	return result, nil
+}
+
+// handleLookupAuditTrail returns a small, time-bounded set of historical
+// events. The Gateway still has to match a candidate to its anchored leaf
+// hash before it can be used for recovery.
+func (s *Server) handleLookupAuditTrail(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !s.authorized(r) {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	query := r.URL.Query()
+	table := strings.TrimSpace(query.Get("table"))
+	operation := strings.ToUpper(strings.TrimSpace(query.Get("operation")))
+	if !IsValidSQLIdentifier(table) {
+		http.Error(w, "invalid table", http.StatusBadRequest)
+		return
+	}
+	primaryKey := strings.TrimSpace(query.Get("primary_key"))
+	recordID := strings.TrimSpace(query.Get("record_id"))
+	if !IsValidSQLIdentifier(primaryKey) || recordID == "" || len(recordID) > 256 {
+		http.Error(w, "invalid resource key", http.StatusBadRequest)
+		return
+	}
+	switch operation {
+	case "INSERT", "UPDATE", "DELETE":
+	default:
+		http.Error(w, "invalid operation", http.StatusBadRequest)
+		return
+	}
+	at, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(query.Get("at")))
+	if err != nil {
+		http.Error(w, "invalid event time", http.StatusBadRequest)
+		return
+	}
+	windowSeconds := 300
+	if value := strings.TrimSpace(query.Get("window_seconds")); value != "" {
+		parsed, parseErr := strconv.Atoi(value)
+		if parseErr != nil || parsed < 1 || parsed > int(maxAuditTrailLookupWindow.Seconds()) {
+			http.Error(w, "invalid lookup window", http.StatusBadRequest)
+			return
+		}
+		windowSeconds = parsed
+	}
+	limit := maxAuditTrailLookupRows
+	if value := strings.TrimSpace(query.Get("limit")); value != "" {
+		parsed, parseErr := strconv.Atoi(value)
+		if parseErr != nil || parsed < 1 || parsed > maxAuditTrailLookupRows {
+			http.Error(w, "invalid result limit", http.StatusBadRequest)
+			return
+		}
+		limit = parsed
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+	defer cancel()
+	result, err := s.queryAuditTrailCandidates(ctx, AuditTrailLookupRequest{
+		Table: table, Operation: operation, PrimaryKey: primaryKey, RecordID: recordID, At: at,
+		Window: time.Duration(windowSeconds) * time.Second, RecordLimit: limit,
+	})
+	if err != nil {
+		s.writeQueryError(w, err)
+		return
+	}
+	s.writeJSON(w, http.StatusOK, result)
+}
+
+func (s *Server) queryAuditTrailCandidates(ctx context.Context, input AuditTrailLookupRequest) (AuditTrailLookupResult, error) {
+	if s.db == nil {
+		return AuditTrailLookupResult{}, errVerifyDatabase
+	}
+	projection := s.auditTrailProjection
+	if !IsValidSQLIdentifier(projection.Table) {
+		return AuditTrailLookupResult{}, errVerifyForbidden
+	}
+	owner := strings.TrimSpace(projection.Schema)
+	if owner != "" && !IsValidSQLIdentifier(owner) {
+		return AuditTrailLookupResult{}, errVerifyForbidden
+	}
+	actualTable := projection.Table
+	if owner == "" {
+		err := s.db.QueryRowContext(ctx, `
+			SELECT owner, table_name
+			FROM (
+				SELECT owner, table_name
+				FROM all_tables
+				WHERE UPPER(table_name) = UPPER(:1)
+				ORDER BY CASE WHEN owner = USER THEN 0 ELSE 1 END, owner
+			)
+			WHERE rownum = 1
+		`, projection.Table).Scan(&owner, &actualTable)
+		if errors.Is(err, sql.ErrNoRows) {
+			return AuditTrailLookupResult{}, errAuditTrailProjectionMiss
+		}
+		if err != nil {
+			log.Printf("[VerifyServer] Gagal mencari tabel audit_trail untuk lookup: %v", err)
+			return AuditTrailLookupResult{}, errVerifyDatabase
+		}
+	}
+	if !IsValidSQLIdentifier(owner) || !IsValidSQLIdentifier(actualTable) {
+		return AuditTrailLookupResult{}, errVerifyForbidden
+	}
+	window := input.Window
+	if window <= 0 || window > maxAuditTrailLookupWindow {
+		return AuditTrailLookupResult{}, errVerifyForbidden
+	}
+	limit := input.RecordLimit
+	if limit <= 0 || limit > maxAuditTrailLookupRows {
+		return AuditTrailLookupResult{}, errVerifyForbidden
+	}
+	from, to := input.At.Add(-window), input.At.Add(window)
+	query := fmt.Sprintf(`
+		SELECT "ID", "TABEL", "OPERASI", "DB_USER", "APP_USER", "DATA_LAMA", "DATA_BARU", "WAKTU"
+		FROM (
+			SELECT "ID", "TABEL", "OPERASI", "DB_USER", "APP_USER", "DATA_LAMA", "DATA_BARU", "WAKTU"
+			FROM "%s"."%s"
+			WHERE UPPER("TABEL") = UPPER(:1)
+			  AND UPPER("OPERASI") = UPPER(:2)
+			  AND "WAKTU" BETWEEN :3 AND :4
+			ORDER BY "WAKTU" DESC, "ID" DESC
+		)
+		WHERE ROWNUM <= :5
+	`, owner, actualTable)
+	rows, err := s.db.QueryContext(ctx, query, input.Table, input.Operation, from, to, limit+1)
+	if err != nil {
+		log.Printf("[VerifyServer] Query audit_trail lookup gagal table=%q operation=%q: %v", input.Table, input.Operation, err)
+		return AuditTrailLookupResult{}, errAuditTrailCandidateLookup
+	}
+	defer rows.Close()
+
+	result := AuditTrailLookupResult{Records: make([]AuditTrailRecord, 0, limit)}
+	readCount := 0
+	for rows.Next() {
+		var id, tableName, operation, dbUser sql.NullString
+		var appUser, oldJSON, newJSON sql.NullString
+		var eventTime sql.NullTime
+		if err := rows.Scan(&id, &tableName, &operation, &dbUser, &appUser, &oldJSON, &newJSON, &eventTime); err != nil {
+			log.Printf("[VerifyServer] Scan audit_trail lookup gagal: %v", err)
+			return AuditTrailLookupResult{}, errAuditTrailCandidateLookup
+		}
+		if readCount == limit {
+			result.Truncated = true
+			break
+		}
+		readCount++
+		dataLama, err := decodeAuditImage(oldJSON)
+		if err != nil {
+			log.Printf("[VerifyServer] Lewati audit_trail candidate id=%q: DATA_LAMA bukan JSON valid", id.String)
+			continue
+		}
+		dataBaru, err := decodeAuditImage(newJSON)
+		if err != nil {
+			log.Printf("[VerifyServer] Lewati audit_trail candidate id=%q: DATA_BARU bukan JSON valid", id.String)
+			continue
+		}
+		record := AuditTrailRecord{
+			Found: true, ID: id.String, Tabel: tableName.String, Operasi: operation.String,
+			DBUser: dbUser.String, DataLama: dataLama, DataBaru: dataBaru,
+		}
+		if appUser.Valid {
+			value := appUser.String
+			record.AppUser = &value
+		}
+		if eventTime.Valid {
+			record.Waktu = eventTime.Time
+		}
+		if auditTrailRecordMatchesKey(record, input.PrimaryKey, input.RecordID) {
+			result.Records = append(result.Records, record)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		log.Printf("[VerifyServer] Iterasi audit_trail lookup gagal: %v", err)
+		return AuditTrailLookupResult{}, errAuditTrailCandidateLookup
+	}
+	return result, nil
+}
+
+func auditTrailRecordMatchesKey(record AuditTrailRecord, primaryKey, expected string) bool {
+	for _, image := range []map[string]interface{}{record.DataLama, record.DataBaru} {
+		for field, value := range image {
+			if strings.EqualFold(field, primaryKey) && value != nil && strings.TrimSpace(fmt.Sprint(value)) == expected {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func decodeAuditImage(raw sql.NullString) (map[string]interface{}, error) {
+	if !raw.Valid || strings.TrimSpace(raw.String) == "" || strings.EqualFold(strings.TrimSpace(raw.String), "null") {
+		return nil, nil
+	}
+	var value map[string]interface{}
+	decoder := json.NewDecoder(strings.NewReader(raw.String))
+	decoder.UseNumber()
+	if err := decoder.Decode(&value); err != nil {
+		return nil, err
+	}
+	return value, nil
+}
+
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -508,6 +876,16 @@ func (s *Server) writeQueryError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, errVerifyForbidden):
 		http.Error(w, "table not allowed", http.StatusForbidden)
+	case errors.Is(err, errAuditTrailProjectionMiss):
+		s.writeJSON(w, http.StatusNotFound, map[string]string{
+			"code":    "audit_trail_table_not_found",
+			"message": "configured source audit history table was not found",
+		})
+	case errors.Is(err, errAuditTrailCandidateLookup):
+		s.writeJSON(w, http.StatusInternalServerError, map[string]string{
+			"code":    "audit_trail_lookup_failed",
+			"message": "source audit history lookup failed",
+		})
 	case errors.Is(err, errVerifyDatabase):
 		w.Header().Set("Content-Type", "application/json")
 		s.writeJSON(w, http.StatusServiceUnavailable, map[string]string{

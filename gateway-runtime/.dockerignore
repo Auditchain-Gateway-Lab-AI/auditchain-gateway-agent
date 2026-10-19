@@ -1,0 +1,12 @@
+.git
+.git/**
+.env
+.env.*
+wallet
+wallet/**
+postman
+postman/**
+gateway-app
+go*.linux-amd64.tar.gz
+docs/*.png
+docs/assets/*.png

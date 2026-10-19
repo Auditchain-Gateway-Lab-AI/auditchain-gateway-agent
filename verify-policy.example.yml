@@ -1,0 +1,34 @@
+# Read-only allowlist for source-row verification.
+# Keep this separate from recovery-policy.yml: read access never grants writes.
+# Add a table only after confirming its Oracle schema, PK, and safe state columns.
+version: 1
+tables:
+  - resource_table: RUANGAN
+    schema: POLINEMA
+    table: RUANGAN
+    primary_key_column: ID
+    state_columns:
+      - ID
+      - NAMA
+      - AKTIF
+      - ID_UNIT
+      - CREATED_AT
+      - UPDATED_AT
+      - USER_INPUT
+      - USER_UPDATED
+  - resource_table: AGAMA
+    schema: POLINEMA
+    table: AGAMA
+    primary_key_column: ID
+    state_columns:
+      - ID
+      - NAMA
+      - KODE
+  - resource_table: BENTUK_MAKANAN
+    schema: POLINEMA
+    table: BENTUK_MAKANAN
+    primary_key_column: ID
+    state_columns:
+      - ID
+      - NAMA
+      - STATUS

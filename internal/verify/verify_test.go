@@ -1,6 +1,8 @@
 package verify
 
 import (
+	"database/sql"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -140,6 +142,112 @@ func TestHandleVerify_DatabaseFailureIsNotFoundFalse(t *testing.T) {
 	}
 	if rr.Body.String() == "{\"found\":false}" {
 		t.Fatal("database failure must not be reported as a missing row")
+	}
+}
+
+func TestHandleVerifyAuditRequiresReadToken(t *testing.T) {
+	server := NewServer(nil, "secret-token", "9090")
+	request := httptest.NewRequest(http.MethodGet, "/verify-audit/620", nil)
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("expected unauthorized, got %d", response.Code)
+	}
+}
+
+func TestSetAuditTrailProjectionNormalizesOracleNames(t *testing.T) {
+	server := NewServer(nil, "secret-token", "9090")
+	server.SetAuditTrailProjection(AuditTrailProjection{Schema: " simrs ", Table: " audit_trail "})
+	if server.auditTrailProjection.Schema != "SIMRS" || server.auditTrailProjection.Table != "AUDIT_TRAIL" {
+		t.Fatalf("projection = %+v, want uppercase Oracle identifiers", server.auditTrailProjection)
+	}
+}
+
+func TestHandleVerifyAuditValidatesRecordIDAndReportsDatabaseUnavailable(t *testing.T) {
+	server := NewServer(nil, "secret-token", "9090")
+	badPath := httptest.NewRequest(http.MethodGet, "/verify-audit/", nil)
+	badPath.Header.Set("Authorization", "Bearer secret-token")
+	badResponse := httptest.NewRecorder()
+	server.Handler().ServeHTTP(badResponse, badPath)
+	if badResponse.Code != http.StatusBadRequest {
+		t.Fatalf("expected bad request for empty source ID, got %d", badResponse.Code)
+	}
+
+	request := httptest.NewRequest(http.MethodGet, "/verify-audit/620", nil)
+	request.Header.Set("Authorization", "Bearer secret-token")
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected database unavailable, got %d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestHandleLookupAuditTrailValidatesBoundedQuery(t *testing.T) {
+	server := NewServer(nil, "secret-token", "9090")
+
+	badWindow := httptest.NewRequest(http.MethodGet, "/verify-audit-lookup?table=RUANGAN&operation=DELETE&primary_key=ID&record_id=613&at=2026-10-08T03%3A00%3A00Z&window_seconds=301", nil)
+	badWindow.Header.Set("Authorization", "Bearer secret-token")
+	badResponse := httptest.NewRecorder()
+	server.Handler().ServeHTTP(badResponse, badWindow)
+	if badResponse.Code != http.StatusBadRequest {
+		t.Fatalf("expected bad request for oversized lookup window, got %d", badResponse.Code)
+	}
+
+	valid := httptest.NewRequest(http.MethodGet, "/verify-audit-lookup?table=RUANGAN&operation=DELETE&primary_key=ID&record_id=613&at=2026-10-08T03%3A00%3A00Z", nil)
+	valid.Header.Set("Authorization", "Bearer secret-token")
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, valid)
+	if response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected database unavailable after valid query, got %d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestWriteQueryErrorClassifiesAuditTrailLookupFailures(t *testing.T) {
+	tests := []struct {
+		name     string
+		err      error
+		status   int
+		wantCode string
+	}{
+		{name: "missing configured audit table", err: errAuditTrailProjectionMiss, status: http.StatusNotFound, wantCode: "audit_trail_table_not_found"},
+		{name: "query failed", err: errAuditTrailCandidateLookup, status: http.StatusInternalServerError, wantCode: "audit_trail_lookup_failed"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			server := NewServer(nil, "", "9090")
+			response := httptest.NewRecorder()
+			server.writeQueryError(response, test.err)
+			if response.Code != test.status {
+				t.Fatalf("status = %d, want %d", response.Code, test.status)
+			}
+			var payload map[string]string
+			if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+				t.Fatalf("decode error response: %v", err)
+			}
+			if payload["code"] != test.wantCode {
+				t.Fatalf("code = %q, want %q", payload["code"], test.wantCode)
+			}
+		})
+	}
+}
+
+func TestDecodeAuditImage(t *testing.T) {
+	image, err := decodeAuditImage(sql.NullString{String: `{"ID":620,"nama":"ruangan"}`, Valid: true})
+	if err != nil {
+		t.Fatalf("decodeAuditImage() error = %v", err)
+	}
+	if image["ID"].(json.Number).String() != "620" || image["nama"] != "ruangan" {
+		t.Fatalf("decoded image = %#v", image)
+	}
+}
+
+func TestAuditTrailRecordMatchesConfiguredPrimaryKey(t *testing.T) {
+	record := AuditTrailRecord{DataLama: map[string]interface{}{"ROOM_ID": json.Number("613")}}
+	if !auditTrailRecordMatchesKey(record, "room_id", "613") {
+		t.Fatal("expected key match to ignore identifier casing")
+	}
+	if auditTrailRecordMatchesKey(record, "room_id", "614") {
+		t.Fatal("unexpected source record key match")
 	}
 }
 
