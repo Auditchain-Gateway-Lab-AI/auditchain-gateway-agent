@@ -89,6 +89,7 @@ type Server struct {
 	verifyToken          string
 	port                 string
 	recoveryHandler      http.Handler
+	auditHandler         http.Handler
 	metricsHandler       http.Handler
 	readProjection       func(string) (ReadProjection, bool)
 	auditTrailProjection AuditTrailProjection
@@ -105,6 +106,15 @@ func NewServer(db *sql.DB, verifyToken, port string) *Server {
 
 func (s *Server) SetRecoveryHandler(handler http.Handler) {
 	s.recoveryHandler = handler
+}
+
+func (s *Server) SetAuditHandler(handler http.Handler) {
+	s.auditHandler = handler
+}
+
+// QueryResource queries one row of tableName with resourceID and returns the ResourceRecord.
+func (s *Server) QueryResource(ctx context.Context, tableName, resourceID string) (ResourceRecord, error) {
+	return s.queryResource(ctx, tableName, resourceID)
 }
 
 func (s *Server) SetMetricsHandler(handler http.Handler) {
@@ -153,6 +163,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/readyz", s.handleReady)
 	if s.recoveryHandler != nil {
 		mux.Handle("/recover/", s.recoveryHandler)
+	}
+	if s.auditHandler != nil {
+		mux.Handle("/audit/", s.auditHandler)
 	}
 	if s.metricsHandler != nil {
 		mux.Handle("/metrics", s.metricsHandler)

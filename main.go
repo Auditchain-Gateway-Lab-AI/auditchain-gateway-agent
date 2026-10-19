@@ -11,6 +11,7 @@ import (
 	"syscall"
 	"time"
 
+	"auditchain-agent/internal/audit"
 	"auditchain-agent/internal/config"
 	"auditchain-agent/internal/recovery"
 	"auditchain-agent/internal/verify"
@@ -88,6 +89,7 @@ func main() {
 	log.Printf("✅ Verify read policy dimuat (%d tabel)", verifyPolicy.TableCount())
 
 	var recoveryPolicy *recovery.PolicySet
+	var recoveryService *recovery.Service
 	if cfg.Recovery.Enabled {
 		recoveryPolicy, err = recovery.LoadPolicy(cfg.Recovery.PolicyPath)
 		if err != nil {
@@ -104,7 +106,7 @@ func main() {
 			log.Fatalf("❌ Gagal membuka recovery state store: %v", storeErr)
 		}
 		repository := recovery.NewOracleRepository(db, cfg.Recovery.ClientID)
-		recoveryService := recovery.NewService(recovery.ServiceConfig{
+		recoveryService = recovery.NewService(recovery.ServiceConfig{
 			Enabled:      cfg.Recovery.Enabled,
 			ClientID:     cfg.Recovery.ClientID,
 			MaxColumns:   cfg.Recovery.MaxColumns,
@@ -131,6 +133,43 @@ func main() {
 		log.Println("🚀 AuditChain Agent mulai berjalan (verify + recovery pilot aktif)")
 	} else {
 		log.Println("🚀 AuditChain Agent mulai berjalan (recovery disabled)")
+	}
+
+
+	// Inisialisasi Modul Audit (Outbound Verification)
+	gatewayClient := audit.NewGatewayClient(
+		cfg.Gateway.URL,
+		cfg.Gateway.Token,
+		time.Duration(cfg.Gateway.TimeoutSeconds)*time.Second,
+	)
+
+	var recoveryExecutor audit.RecoveryExecutor
+	if recoveryService != nil {
+		recoveryExecutor = recoveryService
+	}
+
+	auditService := audit.NewService(
+		audit.ServiceConfig{
+			ClientID:    cfg.Recovery.ClientID,
+			AutoRecover: cfg.Audit.AutoRecover,
+		},
+		gatewayClient,
+		verifyServer,
+		recoveryExecutor,
+	)
+
+	auditHandler := audit.NewHandler(auditService, verifyToken)
+	verifyServer.SetAuditHandler(auditHandler)
+	log.Println("Modul Audit (Outbound Verification) aktif di /audit/")
+
+	if cfg.Audit.Enabled {
+		auditRunner := audit.NewRunner(audit.RunnerConfig{
+			Enabled:     cfg.Audit.Enabled,
+			Interval:    time.Duration(cfg.Audit.IntervalMinutes) * time.Minute,
+			Window:      time.Duration(cfg.Audit.WindowMinutes) * time.Minute,
+			AutoRecover: cfg.Audit.AutoRecover,
+		}, auditService)
+		go auditRunner.Start(ctx)
 	}
 
 	serverErr := make(chan error, 1)

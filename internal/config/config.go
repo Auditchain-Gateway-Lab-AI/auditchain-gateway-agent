@@ -16,6 +16,14 @@ type Config struct {
 	Kafka    KafkaConfig
 	Tables   []TableConfig `yaml:"tables"`
 	Recovery RecoveryConfig
+	Audit    AuditConfig
+}
+
+type AuditConfig struct {
+	Enabled         bool
+	IntervalMinutes int
+	WindowMinutes   int
+	AutoRecover     bool
 }
 
 type ClientConfig struct {
@@ -32,6 +40,7 @@ type SourceDBConfig struct {
 
 type GatewayConfig struct {
 	URL            string
+	Token          string
 	TimeoutSeconds int
 }
 
@@ -78,7 +87,15 @@ func Load(configPath string) (*Config, error) {
 
 	cfg.Client.APIKey = getEnv("AUDITCHAIN_API_KEY", "")
 	cfg.Gateway.URL = getEnv("GATEWAY_URL", "")
+	cfg.Gateway.Token = getEnv("GATEWAY_TOKEN", getEnv("AUDITCHAIN_API_KEY", ""))
 	cfg.Gateway.TimeoutSeconds = getEnvInt("GATEWAY_TIMEOUT_SECONDS", 10)
+
+	auditEnabled, _ := getEnvBool("AGENT_AUDIT_ENABLED", false)
+	cfg.Audit.Enabled = auditEnabled
+	cfg.Audit.IntervalMinutes = getEnvInt("AGENT_AUDIT_INTERVAL_MINUTES", 60)
+	cfg.Audit.WindowMinutes = getEnvInt("AGENT_AUDIT_WINDOW_MINUTES", 1440)
+	auditAutoRecover, _ := getEnvBool("AGENT_AUDIT_AUTO_RECOVER", false)
+	cfg.Audit.AutoRecover = auditAutoRecover
 
 	cfg.SourceDB.Host = getEnv("DB_HOST", "localhost")
 	cfg.SourceDB.Port = getEnvInt("DB_PORT", 1521)
