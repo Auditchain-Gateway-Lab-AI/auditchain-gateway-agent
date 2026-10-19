@@ -162,3 +162,38 @@ func (c *GatewayClient) setHeaders(req *http.Request) {
 		}
 	}
 }
+
+
+// SubmitAuditReport sends the completed audit report to POST /api/agent/audit-report on the Gateway.
+func (c *GatewayClient) SubmitAuditReport(ctx context.Context, report *Report) error {
+	endpoint := fmt.Sprintf("%s/api/agent/audit-report", c.baseURL)
+
+	payloadBytes, err := json.Marshal(report)
+	if err != nil {
+		return fmt.Errorf("marshal audit report: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(payloadBytes))
+	if err != nil {
+		return fmt.Errorf("create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	c.setHeaders(req)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("http request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("read response body: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+		return fmt.Errorf("gateway returned status %d: %s", resp.StatusCode, string(body))
+	}
+
+	return nil
+}

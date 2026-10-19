@@ -241,3 +241,57 @@ func TestAuditTimeRange_FiltersHistoricalLogs(t *testing.T) {
 		t.Errorf("expected DataTampered 0, got %d (historical was wrongly audited)", report.DataTampered)
 	}
 }
+
+
+func TestSubmitAuditReport(t *testing.T) {
+	var receivedReport Report
+	var authHeader string
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/agent/audit-report" {
+			http.NotFound(w, r)
+			return
+		}
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		authHeader = r.Header.Get("Authorization")
+		if err := json.NewDecoder(r.Body).Decode(&receivedReport); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"status":"ok","run_id":"` + receivedReport.RunID + `"}`))
+	}))
+	defer server.Close()
+
+	client := NewGatewayClient(server.URL, "secret-token", 5*time.Second)
+	svc := NewService(ServiceConfig{ClientID: "test-client"}, client, nil, nil)
+
+	testReport := &Report{
+		RunID:       "run-12345",
+		From:        time.Now().Add(-1 * time.Hour),
+		To:          time.Now(),
+		TotalLogs:   10,
+		AuditedLogs: 5,
+		DataValid:   4,
+		DataTampered: 1,
+	}
+
+	err := svc.SubmitReport(context.Background(), testReport)
+	if err != nil {
+		t.Fatalf("SubmitReport failed: %v", err)
+	}
+
+	if authHeader != "Bearer secret-token" {
+		t.Errorf("expected Bearer secret-token, got %s", authHeader)
+	}
+	if receivedReport.RunID != "run-12345" {
+		t.Errorf("expected RunID run-12345, got %s", receivedReport.RunID)
+	}
+	if receivedReport.AuditedLogs != 5 {
+		t.Errorf("expected AuditedLogs 5, got %d", receivedReport.AuditedLogs)
+	}
+}

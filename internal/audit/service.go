@@ -2,6 +2,7 @@
 
 import (
 	"context"
+	"crypto/rand"
 	"fmt"
 	"log"
 	"strings"
@@ -100,6 +101,7 @@ func (s *Service) AuditTimeRange(ctx context.Context, from, to time.Time, autoRe
 	latestLogs := FilterLatestLogs(logs)
 
 	report := &Report{
+		RunID:             generateRunID(),
 		From:              from,
 		To:                to,
 		TotalLogs:         len(logs),
@@ -310,4 +312,24 @@ func parseResource(resource string) (tableName, recordID string, err error) {
 		return "", "", fmt.Errorf("nama tabel atau record ID kosong")
 	}
 	return tableName, recordID, nil
+}
+
+
+func generateRunID() string {
+	b := make([]byte, 16)
+	_, err := rand.Read(b)
+	if err != nil {
+		return fmt.Sprintf("run-%d", time.Now().UnixNano())
+	}
+	b[6] = (b[6] & 0x0f) | 0x40 // Version 4
+	b[8] = (b[8] & 0x3f) | 0x80 // Variant RFC4122
+	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:])
+}
+
+// SubmitReport forwards an audit report to the Gateway.
+func (s *Service) SubmitReport(ctx context.Context, report *Report) error {
+	if s.gateway == nil {
+		return fmt.Errorf("gateway client is not configured")
+	}
+	return s.gateway.SubmitAuditReport(ctx, report)
 }

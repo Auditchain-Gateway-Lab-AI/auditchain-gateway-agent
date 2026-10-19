@@ -89,4 +89,11 @@ func (r *Runner) runAuditOnce(ctx context.Context) {
 		report.BlockchainPending,
 		report.AutoRecoveredCount,
 	)
+
+	// Kirim hasil audit ke auditchain-api Gateway untuk memperbarui statistik dashboard
+	if err := r.service.SubmitReport(ctx, report); err != nil {
+		log.Printf("[AuditRunner] Gagal mengirim audit report ke Gateway: %v", err)
+	} else {
+		log.Printf("[AuditRunner] Berhasil mengirim audit report ke Gateway (RunID: %s)", report.RunID)
+	}
 }

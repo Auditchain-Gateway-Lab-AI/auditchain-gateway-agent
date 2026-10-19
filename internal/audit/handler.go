@@ -2,6 +2,7 @@
 
 import (
 	"context"
+	"log"
 	"crypto/subtle"
 	"encoding/json"
 	"net/http"
@@ -110,6 +111,17 @@ func (h *Handler) HandleRun(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+
+	// Kirim report ke Gateway secara asinkron agar statistik dashboard segera ter-update
+	go func(rep *Report) {
+		submitCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		if err := h.service.SubmitReport(submitCtx, rep); err != nil {
+			log.Printf("[AuditHandler] Gagal mengirim audit report ke Gateway: %v", err)
+		} else {
+			log.Printf("[AuditHandler] Berhasil mengirim audit report ke Gateway (RunID: %s)", rep.RunID)
+		}
+	}(report)
 
 	writeJSON(w, http.StatusOK, report)
 }

@@ -64,6 +64,7 @@ type LogResult struct {
 
 // Report aggregates audit results for an entire batch run.
 type Report struct {
+	RunID              string      `json:"run_id,omitempty"`
 	From               time.Time   `json:"from"`
 	To                 time.Time   `json:"to"`
 	TotalLogs          int         `json:"total_logs"`
