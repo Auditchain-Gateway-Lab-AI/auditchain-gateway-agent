@@ -1,4 +1,4 @@
-﻿package config
+package config
 
 import (
 	"fmt"
@@ -49,9 +49,16 @@ type TableConfig struct {
 }
 
 type RecoveryConfig struct {
-	Enabled  bool
-	ClientID string
-	Token    string
+	Enabled               bool
+	ClientID              string
+	Token                 string
+	StatePath             string
+	PolicyPath            string
+	MaxBodyBytes          int64
+	MaxColumns            int
+	MaxClockSkewSeconds   int
+	RequestTimeoutSeconds int
+	RetentionDays         int
 }
 
 func Load(configPath string) (*Config, error) {
@@ -86,10 +93,34 @@ func Load(configPath string) (*Config, error) {
 	cfg.SourceDB.Password = getEnv("DB_PASSWORD", "")
 	cfg.SourceDB.DBName = getEnv("DB_NAME", "ORCLCDB")
 
-	recoveryEnabled, _ := getEnvBool("AGENT_RECOVERY_ENABLED", true)
+	recoveryEnabled, err := getEnvBool("AGENT_RECOVERY_ENABLED", false)
+	if err != nil {
+		return nil, fmt.Errorf("AGENT_RECOVERY_ENABLED tidak valid: %w", err)
+	}
 	cfg.Recovery.Enabled = recoveryEnabled
 	cfg.Recovery.ClientID = getEnv("AGENT_CLIENT_ID", "")
 	cfg.Recovery.Token = getEnv("AGENT_RECOVERY_TOKEN", "")
+	cfg.Recovery.StatePath = getEnv("AGENT_RECOVERY_STATE_PATH", "./recovery-state.db")
+	cfg.Recovery.PolicyPath = getEnv("AGENT_RECOVERY_POLICY_PATH", "./recovery-policy.yml")
+	cfg.Recovery.MaxBodyBytes = int64(getEnvInt("AGENT_RECOVERY_MAX_BODY_BYTES", 1<<20))
+	cfg.Recovery.MaxColumns = getEnvInt("AGENT_RECOVERY_MAX_COLUMNS", 64)
+	cfg.Recovery.MaxClockSkewSeconds = getEnvInt("AGENT_RECOVERY_MAX_CLOCK_SKEW_SECONDS", 300)
+	cfg.Recovery.RequestTimeoutSeconds = getEnvInt("AGENT_RECOVERY_REQUEST_TIMEOUT_SECONDS", 15)
+	cfg.Recovery.RetentionDays = getEnvInt("AGENT_RECOVERY_RETENTION_DAYS", 90)
+	if recoveryEnabled {
+		if cfg.Recovery.ClientID == "" || cfg.Recovery.Token == "" || cfg.Recovery.StatePath == "" || cfg.Recovery.PolicyPath == "" {
+			return nil, fmt.Errorf("recovery aktif membutuhkan AGENT_CLIENT_ID, AGENT_RECOVERY_TOKEN, AGENT_RECOVERY_STATE_PATH, dan AGENT_RECOVERY_POLICY_PATH")
+		}
+		if len(cfg.Recovery.Token) < 32 {
+			return nil, fmt.Errorf("AGENT_RECOVERY_TOKEN harus minimal 32 karakter")
+		}
+		if cfg.Recovery.Token == cfg.VerifyToken() {
+			return nil, fmt.Errorf("AGENT_RECOVERY_TOKEN harus berbeda dari AGENT_VERIFY_TOKEN")
+		}
+	}
+	if cfg.Audit.AutoRecover && (!recoveryEnabled || cfg.Recovery.Token == "") {
+		return nil, fmt.Errorf("AGENT_AUDIT_AUTO_RECOVER=true membutuhkan recovery aktif dan recovery token terpisah")
+	}
 
 	return &cfg, nil
 }

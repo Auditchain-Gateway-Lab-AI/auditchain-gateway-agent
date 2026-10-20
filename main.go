@@ -108,15 +108,24 @@ func main() {
 
 	// Modul Recovery (Single-row client restoration)
 	var recoveryService *recovery.Service
+	var commandRecoveryService *recovery.CommandService
 	if cfg.Recovery.Enabled {
+		commandRecoveryService, err = recovery.NewCommandService(db, cfg.Recovery, verifyPolicy.ReadMapping)
+		if err != nil {
+			log.Fatalf("❌ Gagal memuat kebijakan Recovery: %v", err)
+		}
 		recoveryService = recovery.NewService(db)
 		if verifyPolicy != nil {
 			recoveryService.SetReadProjection(verifyPolicy.ReadMapping)
 		}
-		verifyServer.SetRecoveryHandler(recovery.NewHandler(recoveryService, verifyToken))
+		recoveryService.SetCommandPolicy(commandRecoveryService.Policy())
+		verifyServer.SetRecoveryHandler(recovery.NewConfiguredHandler(
+			recoveryService, cfg.Recovery.Token, true, cfg.Recovery.ClientID, commandRecoveryService,
+			cfg.Recovery.MaxBodyBytes, time.Duration(cfg.Recovery.RequestTimeoutSeconds)*time.Second,
+		))
 		log.Println("✅ Modul Recovery aktif di endpoint /recover/")
 	} else {
-		verifyServer.SetRecoveryHandler(recovery.NewHandler(nil, verifyToken))
+		verifyServer.SetRecoveryHandler(recovery.NewConfiguredHandler(nil, cfg.Recovery.Token, false, "", nil, cfg.Recovery.MaxBodyBytes, time.Duration(cfg.Recovery.RequestTimeoutSeconds)*time.Second))
 	}
 
 	// Inisialisasi Modul Audit (Outbound Verification)
@@ -142,6 +151,7 @@ func main() {
 	)
 
 	auditHandler := audit.NewHandler(auditService, verifyToken)
+	auditHandler.SetRecoveryAuthorization(cfg.Recovery.Token, cfg.Recovery.Enabled)
 	verifyServer.SetAuditHandler(auditHandler)
 	log.Println("✅ Modul Audit (Outbound Verification) aktif di /audit/")
 

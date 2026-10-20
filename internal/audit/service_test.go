@@ -1,4 +1,4 @@
-﻿package audit
+package audit
 
 import (
 	"context"
@@ -9,11 +9,39 @@ import (
 	"testing"
 	"time"
 
+	"auditchain-agent/internal/recovery"
 	"auditchain-agent/internal/verify"
 )
 
 type mockResourceReader struct {
 	records map[string]verify.ResourceRecord
+}
+
+type recoveryExecutorStub struct{ calls int }
+
+func (s *recoveryExecutorStub) RecoverRow(_ context.Context, _, _ string, _ map[string]interface{}) (*recovery.RecoverResult, error) {
+	s.calls++
+	return &recovery.RecoverResult{Status: "SUCCESS"}, nil
+}
+
+func TestAuditSingleLogExplicitFalseDisablesConfiguredAutoRecovery(t *testing.T) {
+	reader := &mockResourceReader{records: map[string]verify.ResourceRecord{
+		"RUANGAN:1019": {Found: true, Table: "RUANGAN", ID: "1019", Data: map[string]interface{}{"id": 1019, "nama": "TAMPERED"}},
+	}}
+	recoveryExecutor := &recoveryExecutorStub{}
+	service := NewService(ServiceConfig{ClientID: "tenant-1", AutoRecover: true}, NewGatewayClient("http://127.0.0.1:1", "token", time.Second), reader, recoveryExecutor)
+	logEntry := OffchainLog{
+		LogID: "log-1019", ClientID: "tenant-1", Resource: "RUANGAN:1019", Action: "UPDATE",
+		Metadata: `{"data_baru":{"id":1019,"nama":"EXPECTED"}}`, IsLatest: true,
+	}
+
+	result := service.AuditSingleLog(context.Background(), logEntry, false)
+	if result.DataStatus != "TAMPERED" {
+		t.Fatalf("status = %q, want TAMPERED", result.DataStatus)
+	}
+	if recoveryExecutor.calls != 0 {
+		t.Fatalf("recovery calls = %d, want zero when auto_recover=false", recoveryExecutor.calls)
+	}
 }
 
 func (m *mockResourceReader) QueryResource(ctx context.Context, tableName, resourceID string) (verify.ResourceRecord, error) {
@@ -179,22 +207,22 @@ func TestAuditTimeRange_FiltersHistoricalLogs(t *testing.T) {
 
 	mockLogs := []OffchainLog{
 		{
-			LogID:      "log-hist",
-			ClientID:   "test-client",
-			Resource:   "KABUPATEN:1",
-			Action:     "UPDATE",
-			Metadata:   `{"data_baru":{"nama":"KABUPATEN BOGOR LAMA"}}`,
-			Timestamp:  t0,
-			IsLatest:   false,
+			LogID:     "log-hist",
+			ClientID:  "test-client",
+			Resource:  "KABUPATEN:1",
+			Action:    "UPDATE",
+			Metadata:  `{"data_baru":{"nama":"KABUPATEN BOGOR LAMA"}}`,
+			Timestamp: t0,
+			IsLatest:  false,
 		},
 		{
-			LogID:      "log-latest",
-			ClientID:   "test-client",
-			Resource:   "KABUPATEN:1",
-			Action:     "UPDATE",
-			Metadata:   `{"data_baru":{"nama":"KABUPATEN BOGOR BARU"}}`,
-			Timestamp:  t1,
-			IsLatest:   true,
+			LogID:     "log-latest",
+			ClientID:  "test-client",
+			Resource:  "KABUPATEN:1",
+			Action:    "UPDATE",
+			Metadata:  `{"data_baru":{"nama":"KABUPATEN BOGOR BARU"}}`,
+			Timestamp: t1,
+			IsLatest:  true,
 		},
 	}
 
@@ -242,7 +270,6 @@ func TestAuditTimeRange_FiltersHistoricalLogs(t *testing.T) {
 	}
 }
 
-
 func TestSubmitAuditReport(t *testing.T) {
 	var receivedReport Report
 	var authHeader string
@@ -271,12 +298,12 @@ func TestSubmitAuditReport(t *testing.T) {
 	svc := NewService(ServiceConfig{ClientID: "test-client"}, client, nil, nil)
 
 	testReport := &Report{
-		RunID:       "run-12345",
-		From:        time.Now().Add(-1 * time.Hour),
-		To:          time.Now(),
-		TotalLogs:   10,
-		AuditedLogs: 5,
-		DataValid:   4,
+		RunID:        "run-12345",
+		From:         time.Now().Add(-1 * time.Hour),
+		To:           time.Now(),
+		TotalLogs:    10,
+		AuditedLogs:  5,
+		DataValid:    4,
 		DataTampered: 1,
 	}
 

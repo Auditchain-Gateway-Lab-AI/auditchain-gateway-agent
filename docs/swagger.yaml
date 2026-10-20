@@ -136,6 +136,56 @@ definitions:
       timestamp:
         type: string
     type: object
+  recovery.RecoveryCommandRequest:
+    properties:
+      desired_state:
+        additionalProperties: true
+        type: object
+      desired_state_hash:
+        type: string
+      expected_before_hash:
+        type: string
+      idempotency_key:
+        type: string
+      issued_at:
+        type: string
+      operation:
+        type: string
+      reference:
+        properties:
+          anchor_id:
+            type: string
+          audit_leaf_hash:
+            type: string
+          log_id:
+            type: string
+          merkle_root:
+            type: string
+        type: object
+      request_id:
+        type: string
+    type: object
+  recovery.RecoveryCommandResult:
+    properties:
+      after_hash:
+        type: string
+      applied:
+        type: boolean
+      before_hash:
+        type: string
+      checked_at:
+        type: string
+      found_after:
+        type: boolean
+      idempotent_replay:
+        type: boolean
+      operation:
+        type: string
+      readback_match:
+        type: boolean
+      request_id:
+        type: string
+    type: object
   verify.AuditTrailLookupResult:
     properties:
       records:
@@ -436,6 +486,65 @@ paths:
       security:
       - BearerAuth: []
       summary: Pemulihan data satu baris (Single-row Recovery)
+      tags:
+      - Recovery
+  /recover/{table}/{id}:
+    post:
+      consumes:
+      - application/json
+      description: Applies one idempotent, policy-limited row restore after checking
+        the current hash and reading the row back.
+      parameters:
+      - description: Policy-mapped table name
+        in: path
+        name: table
+        required: true
+        type: string
+      - description: Primary key value
+        in: path
+        name: id
+        required: true
+        type: string
+      - description: Recovery command
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/recovery.RecoveryCommandRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/recovery.RecoveryCommandResult'
+        "400":
+          description: Bad Request
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "401":
+          description: Unauthorized
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "403":
+          description: Forbidden
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "409":
+          description: Conflict
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      security:
+      - BearerAuth: []
+      summary: Restore one source row using a verified Gateway command
       tags:
       - Recovery
   /table/{table}:

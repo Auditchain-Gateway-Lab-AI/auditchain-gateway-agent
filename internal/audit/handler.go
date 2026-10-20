@@ -1,10 +1,10 @@
-﻿package audit
+package audit
 
 import (
 	"context"
-	"log"
 	"crypto/subtle"
 	"encoding/json"
+	"log"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -14,8 +14,17 @@ import (
 
 // Handler serves HTTP endpoints for the audit module.
 type Handler struct {
-	service *Service
-	token   string
+	service         *Service
+	token           string
+	recoveryToken   string
+	recoveryEnabled bool
+}
+
+// SetRecoveryAuthorization configures the separate write credential used only
+// when an audit explicitly requests auto-recovery.
+func (h *Handler) SetRecoveryAuthorization(token string, enabled bool) {
+	h.recoveryToken = token
+	h.recoveryEnabled = enabled
 }
 
 // NewHandler creates a new HTTP Handler for audit operations.
@@ -88,6 +97,10 @@ func (h *Handler) HandleRun(w http.ResponseWriter, r *http.Request) {
 		}
 	} else {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if autoRecover && !h.authorizedRecovery(r) {
+		http.Error(w, "recovery write permission required", http.StatusForbidden)
 		return
 	}
 
@@ -182,6 +195,10 @@ func (h *Handler) HandleAuditResource(w http.ResponseWriter, r *http.Request) {
 	if autoRecoverStr := r.URL.Query().Get("auto_recover"); autoRecoverStr != "" {
 		autoRecover, _ = strconv.ParseBool(autoRecoverStr)
 	}
+	if autoRecover && !h.authorizedRecovery(r) {
+		http.Error(w, "recovery write permission required", http.StatusForbidden)
+		return
+	}
 
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
@@ -218,6 +235,14 @@ func (h *Handler) authorized(r *http.Request) bool {
 	}
 	token := authHeader[len(prefix):]
 	return subtle.ConstantTimeCompare([]byte(token), []byte(h.token)) == 1
+}
+
+func (h *Handler) authorizedRecovery(r *http.Request) bool {
+	if !h.recoveryEnabled || h.recoveryToken == "" || h.recoveryToken == h.token {
+		return false
+	}
+	token := r.Header.Get("X-Agent-Recovery-Token")
+	return subtle.ConstantTimeCompare([]byte(token), []byte(h.recoveryToken)) == 1
 }
 
 func writeJSON(w http.ResponseWriter, status int, data interface{}) {

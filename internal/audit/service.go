@@ -1,4 +1,4 @@
-﻿package audit
+package audit
 
 import (
 	"context"
@@ -244,7 +244,7 @@ func (s *Service) AuditSingleLog(ctx context.Context, logEntry OffchainLog, auto
 		result.BlockchainStatus = "SKIPPED" // Do not compare Merkle root if local data is tampered
 
 		// Optional Recovery
-		if (autoRecover || s.cfg.AutoRecover) && s.recoveryExecutor != nil {
+		if autoRecover && s.recoveryExecutor != nil {
 			recovered, recErr := s.triggerRecovery(ctx, tableName, recordID, logEntry)
 			result.AutoRecovered = recovered
 			if recErr != nil {
@@ -313,7 +313,6 @@ func parseResource(resource string) (tableName, recordID string, err error) {
 	}
 	return tableName, recordID, nil
 }
-
 
 func generateRunID() string {
 	b := make([]byte, 16)

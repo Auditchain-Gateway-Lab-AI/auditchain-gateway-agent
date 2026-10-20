@@ -379,6 +379,95 @@
                 }
             }
         },
+        "/recover/{table}/{id}": {
+            "post": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "description": "Applies one idempotent, policy-limited row restore after checking the current hash and reading the row back.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Recovery"
+                ],
+                "summary": "Restore one source row using a verified Gateway command",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Policy-mapped table name",
+                        "name": "table",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "Primary key value",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "description": "Recovery command",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/recovery.RecoveryCommandRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/recovery.RecoveryCommandResult"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    },
+                    "401": {
+                        "description": "Unauthorized",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    },
+                    "403": {
+                        "description": "Forbidden",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    },
+                    "409": {
+                        "description": "Conflict",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    }
+                }
+            }
+        },
         "/table/{table}": {
             "get": {
                 "security": [
@@ -863,6 +952,82 @@
                     "type": "string"
                 },
                 "timestamp": {
+                    "type": "string"
+                }
+            }
+        },
+        "recovery.RecoveryCommandRequest": {
+            "type": "object",
+            "properties": {
+                "desired_state": {
+                    "type": "object",
+                    "additionalProperties": true
+                },
+                "desired_state_hash": {
+                    "type": "string"
+                },
+                "expected_before_hash": {
+                    "type": "string"
+                },
+                "idempotency_key": {
+                    "type": "string"
+                },
+                "issued_at": {
+                    "type": "string"
+                },
+                "operation": {
+                    "type": "string"
+                },
+                "reference": {
+                    "type": "object",
+                    "properties": {
+                        "anchor_id": {
+                            "type": "string"
+                        },
+                        "audit_leaf_hash": {
+                            "type": "string"
+                        },
+                        "log_id": {
+                            "type": "string"
+                        },
+                        "merkle_root": {
+                            "type": "string"
+                        }
+                    }
+                },
+                "request_id": {
+                    "type": "string"
+                }
+            }
+        },
+        "recovery.RecoveryCommandResult": {
+            "type": "object",
+            "properties": {
+                "after_hash": {
+                    "type": "string"
+                },
+                "applied": {
+                    "type": "boolean"
+                },
+                "before_hash": {
+                    "type": "string"
+                },
+                "checked_at": {
+                    "type": "string"
+                },
+                "found_after": {
+                    "type": "boolean"
+                },
+                "idempotent_replay": {
+                    "type": "boolean"
+                },
+                "operation": {
+                    "type": "string"
+                },
+                "readback_match": {
+                    "type": "boolean"
+                },
+                "request_id": {
                     "type": "string"
                 }
             }

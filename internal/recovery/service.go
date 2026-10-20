@@ -1,4 +1,4 @@
-﻿package recovery
+package recovery
 
 import (
 	"context"
@@ -19,6 +19,7 @@ import (
 type Service struct {
 	db             *sql.DB
 	readProjection func(string) (verify.ReadProjection, bool)
+	commandPolicy  *CommandPolicySet
 }
 
 // NewService creates a new recovery Service instance.
@@ -29,6 +30,10 @@ func NewService(db *sql.DB) *Service {
 // SetReadProjection configures policy projection lookup from verify-policy.yml.
 func (s *Service) SetReadProjection(lookup func(string) (verify.ReadProjection, bool)) {
 	s.readProjection = lookup
+}
+
+func (s *Service) SetCommandPolicy(policy *CommandPolicySet) {
+	s.commandPolicy = policy
 }
 
 // RecoverRow restores a single row of a table to the provided clean state.
@@ -50,6 +55,34 @@ func (s *Service) RecoverRow(ctx context.Context, table, recordID string, data m
 	if len(data) == 0 {
 		return nil, errors.New("data payload cannot be empty")
 	}
+	var recoveryTable CommandTablePolicy
+	canonicalData := make(map[string]interface{}, len(data))
+	if s.commandPolicy != nil {
+		var allowed bool
+		recoveryTable, allowed = s.commandPolicy.table(table)
+		if !allowed {
+			return nil, errors.New("table is not allowed by recovery policy")
+		}
+		for key, value := range data {
+			fieldKey := strings.ToLower(strings.TrimSpace(key))
+			field := ""
+			for candidate, column := range recoveryTable.Columns {
+				if strings.EqualFold(candidate, fieldKey) || strings.EqualFold(column.DatabaseColumn, key) {
+					field = candidate
+					break
+				}
+			}
+			column, exists := recoveryTable.Columns[field]
+			if !exists || !column.State {
+				return nil, fmt.Errorf("column %q is not allowed by recovery policy", key)
+			}
+			if field == recoveryTable.PrimaryKeyField && strings.TrimSpace(fmt.Sprint(value)) != recordID {
+				return nil, errors.New("primary key does not match record id")
+			}
+			canonicalData[column.DatabaseColumn] = value
+		}
+		data = canonicalData
+	}
 
 	// 1. Resolve table, schema, and primary key column
 	owner, actualTable, pkCol, err := s.resolveTableInfo(ctx, table)
@@ -69,6 +102,28 @@ func (s *Service) RecoverRow(ctx context.Context, table, recordID string, data m
 	var dummy int
 	checkErr := s.db.QueryRowContext(ctx, checkQuery, recordID).Scan(&dummy)
 	rowExists := checkErr == nil
+	if checkErr != nil && !errors.Is(checkErr, sql.ErrNoRows) {
+		return nil, fmt.Errorf("check source row: %w", checkErr)
+	}
+	if s.commandPolicy != nil {
+		for key := range data {
+			for field, column := range recoveryTable.Columns {
+				if !strings.EqualFold(column.DatabaseColumn, key) {
+					continue
+				}
+				if strings.EqualFold(column.DatabaseColumn, pkCol) {
+					break
+				}
+				if rowExists && !column.Update {
+					return nil, fmt.Errorf("column %q is not updateable by recovery policy", field)
+				}
+				if !rowExists && !column.Insert {
+					return nil, fmt.Errorf("column %q is not insertable by recovery policy", field)
+				}
+				break
+			}
+		}
+	}
 
 	// 3. Prepare columns to recover
 	var cols []string
