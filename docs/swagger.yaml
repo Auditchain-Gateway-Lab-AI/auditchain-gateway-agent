@@ -1,0 +1,637 @@
+basePath: /
+definitions:
+  audit.AuditRunRequest:
+    properties:
+      auto_recover:
+        description: If true and data is tampered, trigger recovery
+        type: boolean
+      from:
+        description: RFC3339 timestamp
+        type: string
+      resource:
+        description: 'Optional: filter by single resource TABLE:ID'
+        type: string
+      to:
+        description: RFC3339 timestamp
+        type: string
+    type: object
+  audit.Discrepancy:
+    properties:
+      actual: {}
+      expected: {}
+      field:
+        type: string
+    type: object
+  audit.LogResult:
+    properties:
+      action:
+        type: string
+      auto_recovered:
+        type: boolean
+      blockchain_status:
+        description: VALID | TAMPERED | PENDING | SKIPPED | ERROR
+        type: string
+      blockchain_tx_id:
+        type: string
+      client_hash:
+        type: string
+      data_status:
+        description: VALID | TAMPERED | NOT_FOUND | ERROR
+        type: string
+      discrepancies:
+        items:
+          $ref: '#/definitions/audit.Discrepancy'
+        type: array
+      error:
+        type: string
+      log_id:
+        type: string
+      merkle_root:
+        type: string
+      offchain_hash:
+        type: string
+      recovery_error:
+        type: string
+      resource:
+        type: string
+    type: object
+  audit.Report:
+    properties:
+      audited_logs:
+        type: integer
+      auto_recovered_count:
+        type: integer
+      blockchain_error:
+        type: integer
+      blockchain_pending:
+        type: integer
+      blockchain_skipped:
+        type: integer
+      blockchain_tampered:
+        type: integer
+      blockchain_valid:
+        type: integer
+      data_error:
+        type: integer
+      data_not_found:
+        type: integer
+      data_tampered:
+        type: integer
+      data_valid:
+        type: integer
+      duration:
+        type: string
+      from:
+        type: string
+      historical_skipped:
+        type: integer
+      results:
+        items:
+          $ref: '#/definitions/audit.LogResult'
+        type: array
+      run_id:
+        type: string
+      to:
+        type: string
+      total_logs:
+        type: integer
+    type: object
+  recovery.RecoverRequest:
+    properties:
+      data:
+        additionalProperties: true
+        description: Clean column-value map
+        type: object
+      id:
+        description: e.g. "3201"
+        type: string
+      resource:
+        description: e.g. "KABUPATEN:3201"
+        type: string
+      table:
+        description: e.g. "KABUPATEN"
+        type: string
+    type: object
+  recovery.RecoverResult:
+    properties:
+      id:
+        description: e.g. "3201"
+        type: string
+      message:
+        type: string
+      operation:
+        description: '"UPDATE" | "INSERT"'
+        type: string
+      recovered_columns:
+        description: list of updated columns
+        items:
+          type: string
+        type: array
+      status:
+        description: '"SUCCESS" | "FAILED"'
+        type: string
+      table:
+        description: e.g. "KABUPATEN"
+        type: string
+      timestamp:
+        type: string
+    type: object
+  verify.AuditTrailLookupResult:
+    properties:
+      records:
+        items:
+          $ref: '#/definitions/verify.AuditTrailRecord'
+        type: array
+      truncated:
+        type: boolean
+    type: object
+  verify.AuditTrailRecord:
+    properties:
+      app_user:
+        type: string
+      data_baru:
+        additionalProperties: true
+        type: object
+      data_lama:
+        additionalProperties: true
+        type: object
+      db_user:
+        type: string
+      found:
+        type: boolean
+      id:
+        type: string
+      operasi:
+        type: string
+      tabel:
+        type: string
+      waktu:
+        type: string
+    type: object
+  verify.ResourceRecord:
+    properties:
+      checked_at:
+        type: string
+      data:
+        additionalProperties: true
+        type: object
+      found:
+        type: boolean
+      id:
+        type: string
+      table:
+        type: string
+    type: object
+host: localhost:9090
+info:
+  contact:
+    email: support@auditchain.id
+    name: Tim AuditChain
+    url: https://auditchain.id
+  description: API AuditChain Agent untuk verifikasi integritas data operasional (Lapis
+    3), pemulihan data (recovery), dan audit independen terhadap blockchain.
+  license:
+    name: Apache 2.0
+    url: http://www.apache.org/licenses/LICENSE-2.0.html
+  termsOfService: http://swagger.io/terms/
+  title: AuditChain Agent API
+  version: "1.0"
+paths:
+  /audit/health:
+    get:
+      description: Mengecek status kesiapan modul audit.
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: Modul audit ok
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      summary: Health check modul audit
+      tags:
+      - Audit
+  /audit/resource/{resource}:
+    get:
+      consumes:
+      - application/json
+      description: Mengaudit integritas satu resource spesifik (format TABLE:ID atau
+        TABLE/ID) terhadap log offchain dan blockchain.
+      parameters:
+      - description: 'Resource yang diaudit (contoh: KABUPATEN:3201 atau KABUPATEN/3201)'
+        in: path
+        name: resource
+        required: true
+        type: string
+      - description: Otomatis pulihkan data jika tampered
+        in: query
+        name: auto_recover
+        type: boolean
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: Hasil audit satu resource
+          schema:
+            $ref: '#/definitions/audit.LogResult'
+        "400":
+          description: Bad Request
+          schema:
+            type: string
+        "401":
+          description: Unauthorized
+          schema:
+            type: string
+        "500":
+          description: Internal Server Error
+          schema:
+            type: string
+      security:
+      - BearerAuth: []
+      summary: Audit satu resource spesifik
+      tags:
+      - Audit
+  /audit/run:
+    get:
+      consumes:
+      - application/json
+      description: 'Memicu proses audit integritas data: mengambil offchain log dari
+        Gateway, membandingkan hash dengan data aktual di database Oracle klien, dan
+        memverifikasi Merkle Root di blockchain via Gateway. Hasilnya otomatis dilaporkan
+        ke Gateway untuk memperbarui statistik dashboard.'
+      parameters:
+      - description: Parameter audit waktu atau resource (hanya untuk POST)
+        in: body
+        name: request
+        schema:
+          $ref: '#/definitions/audit.AuditRunRequest'
+      - description: Waktu awal audit (format RFC3339, e.g. 2026-10-19T00:00:00Z)
+        in: query
+        name: from
+        type: string
+      - description: Waktu akhir audit (format RFC3339, e.g. 2026-10-20T00:00:00Z)
+        in: query
+        name: to
+        type: string
+      - description: Filter resource spesifik (format TABLE:ID)
+        in: query
+        name: resource
+        type: string
+      - description: Otomatis pulihkan data jika ditemukan anomali/tamper
+        in: query
+        name: auto_recover
+        type: boolean
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: Laporan hasil audit
+          schema:
+            $ref: '#/definitions/audit.Report'
+        "400":
+          description: Bad Request
+          schema:
+            type: string
+        "401":
+          description: Unauthorized
+          schema:
+            type: string
+        "500":
+          description: Internal Server Error
+          schema:
+            type: string
+      security:
+      - BearerAuth: []
+      summary: Jalankan audit integritas data
+      tags:
+      - Audit
+    post:
+      consumes:
+      - application/json
+      description: 'Memicu proses audit integritas data: mengambil offchain log dari
+        Gateway, membandingkan hash dengan data aktual di database Oracle klien, dan
+        memverifikasi Merkle Root di blockchain via Gateway. Hasilnya otomatis dilaporkan
+        ke Gateway untuk memperbarui statistik dashboard.'
+      parameters:
+      - description: Parameter audit waktu atau resource (hanya untuk POST)
+        in: body
+        name: request
+        schema:
+          $ref: '#/definitions/audit.AuditRunRequest'
+      - description: Waktu awal audit (format RFC3339, e.g. 2026-10-19T00:00:00Z)
+        in: query
+        name: from
+        type: string
+      - description: Waktu akhir audit (format RFC3339, e.g. 2026-10-20T00:00:00Z)
+        in: query
+        name: to
+        type: string
+      - description: Filter resource spesifik (format TABLE:ID)
+        in: query
+        name: resource
+        type: string
+      - description: Otomatis pulihkan data jika ditemukan anomali/tamper
+        in: query
+        name: auto_recover
+        type: boolean
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: Laporan hasil audit
+          schema:
+            $ref: '#/definitions/audit.Report'
+        "400":
+          description: Bad Request
+          schema:
+            type: string
+        "401":
+          description: Unauthorized
+          schema:
+            type: string
+        "500":
+          description: Internal Server Error
+          schema:
+            type: string
+      security:
+      - BearerAuth: []
+      summary: Jalankan audit integritas data
+      tags:
+      - Audit
+  /health:
+    get:
+      description: Mengecek status kesehatan dasar aplikasi Agent.
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: Status agent sehat
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      summary: Health check agent
+      tags:
+      - Health
+  /readyz:
+    get:
+      description: Mengecek kesiapan Agent dan konektivitas ke database Oracle.
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: Agent siap menerima koneksi
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "503":
+          description: Database tidak dapat dihubungi
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      summary: Readiness check agent
+      tags:
+      - Health
+  /recover:
+    post:
+      consumes:
+      - application/json
+      description: Melakukan pemulihan (rollback/update) satu baris data operasional
+        di database Oracle klien menggunakan payload data bersih dari blockchain/offchain
+        log.
+      parameters:
+      - description: Detail baris dan data bersih yang akan dipulihkan
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/recovery.RecoverRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: Hasil pemulihan data
+          schema:
+            $ref: '#/definitions/recovery.RecoverResult'
+        "400":
+          description: Bad Request
+          schema:
+            type: string
+        "401":
+          description: Unauthorized
+          schema:
+            type: string
+        "500":
+          description: Gagal memulihkan baris
+          schema:
+            additionalProperties: true
+            type: object
+        "503":
+          description: Recovery service disabled
+          schema:
+            type: string
+      security:
+      - BearerAuth: []
+      summary: Pemulihan data satu baris (Single-row Recovery)
+      tags:
+      - Recovery
+  /table/{table}:
+    get:
+      consumes:
+      - application/json
+      description: Membaca daftar record dari tabel operasional secara bulk (hanya
+        aktif jika AGENT_ENABLE_TABLE_ENDPOINT=true).
+      parameters:
+      - description: Nama tabel
+        in: path
+        name: table
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: Data tabel
+          schema:
+            additionalProperties: true
+            type: object
+        "400":
+          description: Bad Request
+          schema:
+            type: string
+        "401":
+          description: Unauthorized
+          schema:
+            type: string
+        "404":
+          description: Not Found / Endpoint Disabled
+          schema:
+            type: string
+        "500":
+          description: Internal Server Error
+          schema:
+            type: string
+      security:
+      - BearerAuth: []
+      summary: Ambil data tabel secara bulk (jika diaktifkan)
+      tags:
+      - Verify
+  /verify-audit-lookup:
+    get:
+      consumes:
+      - application/json
+      description: Mencari histori perubahan data dari tabel audit_trail dengan filter
+        tabel, record_id, rentang waktu, dan pagination.
+      parameters:
+      - description: Nama tabel
+        in: query
+        name: table
+        required: true
+        type: string
+      - description: ID baris record
+        in: query
+        name: id
+        type: string
+      - description: Operasi (INSERT, UPDATE, DELETE)
+        in: query
+        name: operation
+        type: string
+      - description: Timestamp referensi (RFC3339)
+        in: query
+        name: at
+        type: string
+      - description: Batas awal waktu (RFC3339)
+        in: query
+        name: from
+        type: string
+      - description: Batas akhir waktu (RFC3339)
+        in: query
+        name: to
+        type: string
+      - description: Batas jumlah record (default 50, max 200)
+        in: query
+        name: limit
+        type: integer
+      - description: Offset pagination
+        in: query
+        name: offset
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: Daftar rekaman audit trail
+          schema:
+            $ref: '#/definitions/verify.AuditTrailLookupResult'
+        "400":
+          description: Bad Request
+          schema:
+            type: string
+        "401":
+          description: Unauthorized
+          schema:
+            type: string
+        "500":
+          description: Internal Server Error
+          schema:
+            type: string
+      security:
+      - BearerAuth: []
+      summary: Cari rekaman audit trail historis
+      tags:
+      - Verify
+  /verify-audit/{id}:
+    get:
+      consumes:
+      - application/json
+      description: Mengambil satu record historis dari tabel audit_trail berdasarkan
+        ID audit_trail.
+      parameters:
+      - description: ID baris audit trail
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: Rekaman audit trail historis
+          schema:
+            $ref: '#/definitions/verify.AuditTrailRecord'
+        "400":
+          description: Bad Request
+          schema:
+            type: string
+        "401":
+          description: Unauthorized
+          schema:
+            type: string
+        "404":
+          description: Not Found
+          schema:
+            type: string
+        "500":
+          description: Internal Server Error
+          schema:
+            type: string
+      security:
+      - BearerAuth: []
+      summary: Ambil satu rekaman audit trail historis
+      tags:
+      - Verify
+  /verify/{table}/{id}:
+    get:
+      consumes:
+      - application/json
+      description: Membaca baris data terkini langsung dari tabel operasional Oracle
+        berdasarkan tabel dan ID primary key.
+      parameters:
+      - description: 'Nama tabel operasional (contoh: KABUPATEN)'
+        in: path
+        name: table
+        required: true
+        type: string
+      - description: Nilai primary key / ID baris
+        in: path
+        name: id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: Data baris operasional terkini
+          schema:
+            $ref: '#/definitions/verify.ResourceRecord'
+        "400":
+          description: Bad Request
+          schema:
+            type: string
+        "401":
+          description: Unauthorized
+          schema:
+            type: string
+        "404":
+          description: Not Found
+          schema:
+            type: string
+        "500":
+          description: Internal Server Error
+          schema:
+            type: string
+      security:
+      - BearerAuth: []
+      summary: Ambil data operasional terkini (Lapis 3)
+      tags:
+      - Verify
+securityDefinitions:
+  BearerAuth:
+    description: 'Masukkan token otentikasi dengan format: Bearer <token>'
+    in: header
+    name: Authorization
+    type: apiKey
+swagger: "2.0"

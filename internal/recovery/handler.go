@@ -29,6 +29,20 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // HandleRecover handles POST /recover.
+// HandleRecover godoc
+// @Summary Pemulihan data satu baris (Single-row Recovery)
+// @Description Melakukan pemulihan (rollback/update) satu baris data operasional di database Oracle klien menggunakan payload data bersih dari blockchain/offchain log.
+// @Tags Recovery
+// @Accept json
+// @Produce json
+// @Security BearerAuth
+// @Param request body RecoverRequest true "Detail baris dan data bersih yang akan dipulihkan"
+// @Success 200 {object} RecoverResult "Hasil pemulihan data"
+// @Failure 400 {string} string "Bad Request"
+// @Failure 401 {string} string "Unauthorized"
+// @Failure 500 {object} map[string]interface{} "Gagal memulihkan baris"
+// @Failure 503 {string} string "Recovery service disabled"
+// @Router /recover [post]
 func (h *Handler) HandleRecover(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)

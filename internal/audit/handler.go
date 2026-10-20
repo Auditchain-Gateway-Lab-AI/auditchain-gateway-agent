@@ -44,6 +44,24 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // HandleRun handles POST /audit/run and GET /audit/run.
+// HandleRun godoc
+// @Summary Jalankan audit integritas data
+// @Description Memicu proses audit integritas data: mengambil offchain log dari Gateway, membandingkan hash dengan data aktual di database Oracle klien, dan memverifikasi Merkle Root di blockchain via Gateway. Hasilnya otomatis dilaporkan ke Gateway untuk memperbarui statistik dashboard.
+// @Tags Audit
+// @Accept json
+// @Produce json
+// @Security BearerAuth
+// @Param request body AuditRunRequest false "Parameter audit waktu atau resource (hanya untuk POST)"
+// @Param from query string false "Waktu awal audit (format RFC3339, e.g. 2026-10-19T00:00:00Z)"
+// @Param to query string false "Waktu akhir audit (format RFC3339, e.g. 2026-10-20T00:00:00Z)"
+// @Param resource query string false "Filter resource spesifik (format TABLE:ID)"
+// @Param auto_recover query bool false "Otomatis pulihkan data jika ditemukan anomali/tamper"
+// @Success 200 {object} Report "Laporan hasil audit"
+// @Failure 400 {string} string "Bad Request"
+// @Failure 401 {string} string "Unauthorized"
+// @Failure 500 {string} string "Internal Server Error"
+// @Router /audit/run [post]
+// @Router /audit/run [get]
 func (h *Handler) HandleRun(w http.ResponseWriter, r *http.Request) {
 	if !h.authorized(r) {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
@@ -127,6 +145,20 @@ func (h *Handler) HandleRun(w http.ResponseWriter, r *http.Request) {
 }
 
 // HandleAuditResource handles GET /audit/resource/:resource.
+// HandleAuditResource godoc
+// @Summary Audit satu resource spesifik
+// @Description Mengaudit integritas satu resource spesifik (format TABLE:ID atau TABLE/ID) terhadap log offchain dan blockchain.
+// @Tags Audit
+// @Accept json
+// @Produce json
+// @Security BearerAuth
+// @Param resource path string true "Resource yang diaudit (contoh: KABUPATEN:3201 atau KABUPATEN/3201)"
+// @Param auto_recover query bool false "Otomatis pulihkan data jika tampered"
+// @Success 200 {object} LogResult "Hasil audit satu resource"
+// @Failure 400 {string} string "Bad Request"
+// @Failure 401 {string} string "Unauthorized"
+// @Failure 500 {string} string "Internal Server Error"
+// @Router /audit/resource/{resource} [get]
 func (h *Handler) HandleAuditResource(w http.ResponseWriter, r *http.Request) {
 	if !h.authorized(r) {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
@@ -164,6 +196,13 @@ func (h *Handler) HandleAuditResource(w http.ResponseWriter, r *http.Request) {
 }
 
 // HandleHealth handles GET /audit/health.
+// HandleHealth godoc
+// @Summary Health check modul audit
+// @Description Mengecek status kesiapan modul audit.
+// @Tags Audit
+// @Produce json
+// @Success 200 {object} map[string]string "Modul audit ok"
+// @Router /audit/health [get]
 func (h *Handler) HandleHealth(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "module": "audit"})
 }
