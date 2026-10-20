@@ -1,4 +1,23 @@
-﻿package main
+// @title AuditChain Agent API
+// @version 1.0
+// @description API AuditChain Agent untuk verifikasi integritas data operasional (Lapis 3), pemulihan data (recovery), dan audit independen terhadap blockchain.
+// @termsOfService http://swagger.io/terms/
+
+// @contact.name Tim AuditChain
+// @contact.url https://auditchain.id
+// @contact.email support@auditchain.id
+
+// @license.name Apache 2.0
+// @license.url http://www.apache.org/licenses/LICENSE-2.0.html
+
+// @host localhost:9090
+// @BasePath /
+
+// @securityDefinitions.apikey BearerAuth
+// @in header
+// @name Authorization
+// @description Masukkan token otentikasi dengan format: Bearer <token>
+package main
 
 import (
 	"context"
@@ -11,6 +30,7 @@ import (
 	"syscall"
 	"time"
 
+	_ "auditchain-agent/docs"
 	"auditchain-agent/internal/audit"
 	"auditchain-agent/internal/config"
 	"auditchain-agent/internal/recovery"

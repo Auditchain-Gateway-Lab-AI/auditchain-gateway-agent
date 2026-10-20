@@ -13,6 +13,9 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	_ "auditchain-agent/docs"
+	httpSwagger "github.com/swaggo/http-swagger/v2"
 )
 
 var identifierPattern = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*$`)
@@ -154,6 +157,15 @@ func (s *Server) Handler() http.Handler {
 	if s.metricsHandler != nil {
 		mux.Handle("/metrics", s.metricsHandler)
 	}
+
+	// Swagger documentation UI
+	mux.HandleFunc("/swagger", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/swagger/index.html", http.StatusMovedPermanently)
+	})
+	mux.Handle("/swagger/", httpSwagger.Handler(
+		httpSwagger.URL("/swagger/doc.json"),
+	))
+
 	return mux
 }
 
@@ -195,41 +207,6 @@ func (s *Server) Start() {
 	if err := s.Run(context.Background()); err != nil {
 		log.Printf("❌ [VerifyServer] Gagal start: %v", err)
 	}
-}
-
-// handleVerifyResource melayani GET /verify-resource/<table>/<id>
-// Gateway memanggil ini dengan nama tabel dan id dari kolom resource (format: tabel:id)
-func (s *Server) handleVerifyResource(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	// Autentikasi
-	if !s.authorized(r) {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
-		return
-	}
-
-	// Ekstrak table dan id dari path: /verify-resource/<table>/<id>
-	path := strings.TrimPrefix(r.URL.Path, "/verify-resource/")
-	parts := strings.SplitN(path, "/", 2)
-	if len(parts) != 2 || parts[0] == "" || parts[1] == "" || len(parts[1]) > 256 {
-		http.Error(w, "format path harus /verify-resource/<table>/<id>", http.StatusBadRequest)
-		return
-	}
-
-	tableName := parts[0]
-	resourceID := parts[1]
-
-	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
-	defer cancel()
-	rec, err := s.queryResource(ctx, tableName, resourceID)
-	if err != nil {
-		s.writeQueryError(w, err)
-		return
-	}
-	s.writeJSON(w, http.StatusOK, rec)
 }
 
 // IsValidSQLIdentifier memvalidasi apakah string aman digunakan sebagai identifier SQL (seperti nama tabel/kolom)
@@ -476,6 +453,21 @@ func (s *Server) findPKColumnStrict(ctx context.Context, owner, tableName string
 }
 
 // handleVerify melayani GET /verify/<table>/<id> untuk database non-spasial (seperti SIMRS)
+// handleVerify godoc
+// @Summary Ambil data operasional terkini (Lapis 3)
+// @Description Membaca baris data terkini langsung dari tabel operasional Oracle berdasarkan tabel dan ID primary key.
+// @Tags Verify
+// @Accept json
+// @Produce json
+// @Security BearerAuth
+// @Param table path string true "Nama tabel operasional (contoh: KABUPATEN)"
+// @Param id path string true "Nilai primary key / ID baris"
+// @Success 200 {object} ResourceRecord "Data baris operasional terkini"
+// @Failure 400 {string} string "Bad Request"
+// @Failure 401 {string} string "Unauthorized"
+// @Failure 404 {string} string "Not Found"
+// @Failure 500 {string} string "Internal Server Error"
+// @Router /verify/{table}/{id} [get]
 func (s *Server) handleVerify(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -510,6 +502,20 @@ func (s *Server) handleVerify(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleVerifyAudit serves GET /verify-audit/<audit_trail_id>.
+// handleVerifyAudit godoc
+// @Summary Ambil satu rekaman audit trail historis
+// @Description Mengambil satu record historis dari tabel audit_trail berdasarkan ID audit_trail.
+// @Tags Verify
+// @Accept json
+// @Produce json
+// @Security BearerAuth
+// @Param id path string true "ID baris audit trail"
+// @Success 200 {object} AuditTrailRecord "Rekaman audit trail historis"
+// @Failure 400 {string} string "Bad Request"
+// @Failure 401 {string} string "Unauthorized"
+// @Failure 404 {string} string "Not Found"
+// @Failure 500 {string} string "Internal Server Error"
+// @Router /verify-audit/{id} [get]
 func (s *Server) handleVerifyAudit(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -615,6 +621,26 @@ func (s *Server) queryAuditTrail(ctx context.Context, recordID string) (AuditTra
 // handleLookupAuditTrail returns a small, time-bounded set of historical
 // events. The Gateway still has to match a candidate to its anchored leaf
 // hash before it can be used for recovery.
+// handleLookupAuditTrail godoc
+// @Summary Cari rekaman audit trail historis
+// @Description Mencari histori perubahan data dari tabel audit_trail dengan filter tabel, record_id, rentang waktu, dan pagination.
+// @Tags Verify
+// @Accept json
+// @Produce json
+// @Security BearerAuth
+// @Param table query string true "Nama tabel"
+// @Param id query string false "ID baris record"
+// @Param operation query string false "Operasi (INSERT, UPDATE, DELETE)"
+// @Param at query string false "Timestamp referensi (RFC3339)"
+// @Param from query string false "Batas awal waktu (RFC3339)"
+// @Param to query string false "Batas akhir waktu (RFC3339)"
+// @Param limit query int false "Batas jumlah record (default 50, max 200)"
+// @Param offset query int false "Offset pagination"
+// @Success 200 {object} AuditTrailLookupResult "Daftar rekaman audit trail"
+// @Failure 400 {string} string "Bad Request"
+// @Failure 401 {string} string "Unauthorized"
+// @Failure 500 {string} string "Internal Server Error"
+// @Router /verify-audit-lookup [get]
 func (s *Server) handleLookupAuditTrail(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -815,6 +841,13 @@ func decodeAuditImage(raw sql.NullString) (map[string]interface{}, error) {
 	return value, nil
 }
 
+// handleHealth godoc
+// @Summary Health check agent
+// @Description Mengecek status kesehatan dasar aplikasi Agent.
+// @Tags Health
+// @Produce json
+// @Success 200 {object} map[string]string "Status agent sehat"
+// @Router /health [get]
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -824,6 +857,14 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 }
 
+// handleReady godoc
+// @Summary Readiness check agent
+// @Description Mengecek kesiapan Agent dan konektivitas ke database Oracle.
+// @Tags Health
+// @Produce json
+// @Success 200 {object} map[string]string "Agent siap menerima koneksi"
+// @Failure 503 {object} map[string]string "Database tidak dapat dihubungi"
+// @Router /readyz [get]
 func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -895,6 +936,20 @@ func (s *Server) writeQueryError(w http.ResponseWriter, err error) {
 }
 
 // handleTable melayani GET /table/<table> untuk mengambil semua baris dari tabel
+// handleTable godoc
+// @Summary Ambil data tabel secara bulk (jika diaktifkan)
+// @Description Membaca daftar record dari tabel operasional secara bulk (hanya aktif jika AGENT_ENABLE_TABLE_ENDPOINT=true).
+// @Tags Verify
+// @Accept json
+// @Produce json
+// @Security BearerAuth
+// @Param table path string true "Nama tabel"
+// @Success 200 {object} map[string]interface{} "Data tabel"
+// @Failure 400 {string} string "Bad Request"
+// @Failure 401 {string} string "Unauthorized"
+// @Failure 404 {string} string "Not Found / Endpoint Disabled"
+// @Failure 500 {string} string "Internal Server Error"
+// @Router /table/{table} [get]
 func (s *Server) handleTable(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)

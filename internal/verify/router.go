@@ -12,10 +12,6 @@ func RegisterRoutes(mux *http.ServeMux, s *Server) {
 	mux.HandleFunc("/verify-audit/", s.handleVerifyAudit)
 	mux.HandleFunc("/verify-audit-lookup", s.handleLookupAuditTrail)
 
-	// Resource geospasial (untuk Satu Peta)
-	// Format: GET /verify-resource/<table>/<id>
-	mux.HandleFunc("/verify-resource/", s.handleVerifyResource)
-
 	if s.tableEndpointEnabled {
 		mux.HandleFunc("/table/", s.handleTable)
 	} else {

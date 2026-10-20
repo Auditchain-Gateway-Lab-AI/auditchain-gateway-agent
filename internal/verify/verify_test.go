@@ -65,39 +65,6 @@ func TestHandleHealth(t *testing.T) {
 	}
 }
 
-func TestHandleVerifyResource_Auth(t *testing.T) {
-	server := NewServer(nil, "secret-token", "9090")
-
-	// 1. Test unauthorized request (missing token)
-	req1, err := http.NewRequest(http.MethodGet, "/verify-resource/users/1", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	rr1 := httptest.NewRecorder()
-	handler := http.HandlerFunc(server.handleVerifyResource)
-	handler.ServeHTTP(rr1, req1)
-
-	if rr1.Code != http.StatusUnauthorized {
-		t.Errorf("expected unauthorized (401), got %v", rr1.Code)
-	}
-
-	// 2. Test authorized request (valid token)
-	// We use a nil DB, so if auth passes, it will try to hit the DB query resource and return (but since it panics or fails query, we check if it reaches further)
-	// Actually, let's catch if it goes past auth. If it goes past auth, it calls queryResource which will try to access s.db. Since s.db is nil, it will panic or fail.
-	// But let's verify if wrong token gets unauthorized:
-	req2, err := http.NewRequest(http.MethodGet, "/verify-resource/users/1", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	req2.Header.Set("Authorization", "Bearer wrong-token")
-	rr2 := httptest.NewRecorder()
-	handler.ServeHTTP(rr2, req2)
-
-	if rr2.Code != http.StatusUnauthorized {
-		t.Errorf("expected unauthorized (401) for wrong token, got %v", rr2.Code)
-	}
-}
-
 func TestHandleVerify_Auth(t *testing.T) {
 	server := NewServer(nil, "secret-token", "9090")
 
@@ -257,5 +224,40 @@ func TestTableEndpointDisabledByDefault(t *testing.T) {
 	server.Handler().ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/table/users", nil))
 	if rr.Code != http.StatusNotFound {
 		t.Fatalf("expected disabled table endpoint 404, got %d", rr.Code)
+	}
+}
+
+
+func TestSwaggerEndpoints(t *testing.T) {
+	server := NewServer(nil, "", "9090")
+	handler := server.Handler()
+
+	// 1. Test redirect /swagger -> /swagger/index.html
+	rr1 := httptest.NewRecorder()
+	handler.ServeHTTP(rr1, httptest.NewRequest(http.MethodGet, "/swagger", nil))
+	if rr1.Code != http.StatusMovedPermanently {
+		t.Errorf("expected 301 for /swagger redirect, got %d", rr1.Code)
+	}
+
+	// 2. Test /swagger/doc.json returns 200 and valid JSON
+	rr2 := httptest.NewRecorder()
+	handler.ServeHTTP(rr2, httptest.NewRequest(http.MethodGet, "/swagger/doc.json", nil))
+	if rr2.Code != http.StatusOK {
+		t.Fatalf("expected 200 for /swagger/doc.json, got %d: %s", rr2.Code, rr2.Body.String())
+	}
+
+	var doc map[string]interface{}
+	if err := json.Unmarshal(rr2.Body.Bytes(), &doc); err != nil {
+		t.Fatalf("failed to decode swagger json: %v", err)
+	}
+	if doc["swagger"] != "2.0" {
+		t.Errorf("expected swagger version 2.0, got %v", doc["swagger"])
+	}
+
+	// 3. Test /swagger/index.html returns 200
+	rr3 := httptest.NewRecorder()
+	handler.ServeHTTP(rr3, httptest.NewRequest(http.MethodGet, "/swagger/index.html", nil))
+	if rr3.Code != http.StatusOK {
+		t.Errorf("expected 200 for /swagger/index.html, got %d", rr3.Code)
 	}
 }
