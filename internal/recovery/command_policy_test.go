@@ -15,6 +15,16 @@ func recoveryReadMapping(table string) (verify.ReadProjection, bool) {
 	return verify.ReadProjection{Schema: "POLINEMA", Table: "RUANGAN", PrimaryKey: "ID", StateColumns: []string{"ID", "NAMA"}}, true
 }
 
+func TestValidateDesiredStateRejectsRedactionMarkers(t *testing.T) {
+	table := CommandTablePolicy{PrimaryKeyField: "id", Columns: map[string]CommandColumnPolicy{"id": {State: true}, "nama": {State: true}}}
+	for _, marker := range []string{"[REDACTED]", "***REDACTED***"} {
+		failure := validateDesiredState(table, "7", map[string]interface{}{"id": 7, "nama": marker})
+		if failure == nil || failure.Code != "desired_state_redacted" {
+			t.Fatalf("marker %q failure = %#v", marker, failure)
+		}
+	}
+}
+
 func TestRuanganPilotPolicyMatchesCommittedReadProjection(t *testing.T) {
 	read, err := verify.LoadReadPolicy(filepath.Join("..", "..", "verify-policy.yml"))
 	if err != nil {
@@ -97,6 +107,35 @@ tables:
 	}
 	if _, err := LoadCommandPolicy(path, recoveryReadMapping); err == nil {
 		t.Fatal("sensitive columns must not be allowed")
+	}
+}
+
+func TestAssessOperationChecksAllowlistPayloadAndChangedColumns(t *testing.T) {
+	policy := &CommandPolicySet{tables: map[string]CommandTablePolicy{
+		"RUANGAN": {
+			ResourceTable: "RUANGAN", PrimaryKeyField: "id", Operations: []string{"UPSERT"},
+			Columns: map[string]CommandColumnPolicy{
+				"id":         {DatabaseColumn: "ID", State: true, Insert: true, Immutable: true},
+				"nama":       {DatabaseColumn: "NAMA", State: true, Insert: true, Update: true},
+				"created_at": {DatabaseColumn: "CREATED_AT", State: true, Insert: true, Immutable: true},
+			},
+		},
+	}}
+	allFields := []string{"ID", "NAMA", "CREATED_AT"}
+	if allowed, reason := policy.assessOperation("ruangan", "UPSERT", true, allFields, []string{"NAMA"}); !allowed || reason != "" {
+		t.Fatalf("allowed update assessment = %v/%q", allowed, reason)
+	}
+	if allowed, reason := policy.assessOperation("RUANGAN", "UPSERT", true, allFields, []string{"CREATED_AT"}); allowed || reason != "column_not_updateable" {
+		t.Fatalf("immutable update assessment = %v/%q, want column_not_updateable", allowed, reason)
+	}
+	if allowed, reason := policy.assessOperation("RUANGAN", "UPSERT", true, []string{"ID", "NAMA"}, []string{"NAMA"}); allowed || reason != "payload_incomplete" {
+		t.Fatalf("incomplete state assessment = %v/%q, want payload_incomplete", allowed, reason)
+	}
+	if allowed, reason := policy.assessOperation("RUANGAN", "DELETE", true, nil, nil); allowed || reason != "operation_not_allowed" {
+		t.Fatalf("disallowed operation assessment = %v/%q, want operation_not_allowed", allowed, reason)
+	}
+	if allowed, reason := policy.assessOperation("RUANGAN", "UPSERT", false, allFields, nil); !allowed || reason != "" {
+		t.Fatalf("allowed insert assessment = %v/%q", allowed, reason)
 	}
 }
 

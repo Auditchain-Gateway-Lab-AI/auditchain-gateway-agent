@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -95,10 +96,24 @@ func (h *Handler) HandleCapabilities(w http.ResponseWriter, r *http.Request) {
 	} else if !allowed {
 		reason = "table_not_allowed"
 	}
+	response := map[string]interface{}{"enabled": ready, "allowed": allowed, "reason": reason}
+	operation := strings.ToUpper(strings.TrimSpace(r.URL.Query().Get("operation")))
+	if operation != "" {
+		sourceFoundValue := strings.TrimSpace(r.URL.Query().Get("source_found"))
+		sourceFound, err := strconv.ParseBool(sourceFoundValue)
+		if err != nil {
+			writeCommandError(w, commandFailure(http.StatusBadRequest, "invalid_payload", "source_found must be true or false when operation is provided"))
+			return
+		}
+		operationAllowed := false
+		if ready && allowed {
+			operationAllowed, reason = h.command.policy.assessOperation(table, operation, sourceFound, r.URL.Query()["field"], r.URL.Query()["changed_field"])
+		}
+		response["operation_allowed"] = operationAllowed
+		response["reason"] = reason
+	}
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]interface{}{
-		"enabled": ready, "allowed": allowed, "reason": reason,
-	})
+	_ = json.NewEncoder(w).Encode(response)
 }
 
 // HandleRecover handles POST /recover.

@@ -93,6 +93,45 @@ func TestRecoveryCapabilityRequiresWriteTokenAndReportsPolicy(t *testing.T) {
 	}
 }
 
+func TestRecoveryCapabilityReportsOperationAndColumnBlockers(t *testing.T) {
+	table := CommandTablePolicy{
+		Operations: []string{"UPSERT"},
+		Columns: map[string]CommandColumnPolicy{
+			"id":   {DatabaseColumn: "ID", State: true, Insert: true, Immutable: true},
+			"nama": {DatabaseColumn: "NAMA", State: true, Insert: true, Update: true},
+		},
+	}
+	handler := NewConfiguredHandler(nil, "write-token", true, "tenant-1", &CommandService{
+		enabled: true, clientID: "tenant-1", policy: &CommandPolicySet{tables: map[string]CommandTablePolicy{"RUANGAN": table}},
+	}, 4096, time.Second)
+	cases := []struct {
+		name, query, reason string
+		allowed             bool
+	}{
+		{name: "allowed upsert", query: "table=RUANGAN&operation=UPSERT&source_found=true&field=ID&field=NAMA&changed_field=NAMA", allowed: true},
+		{name: "incomplete state", query: "table=RUANGAN&operation=UPSERT&source_found=true&field=ID&changed_field=NAMA", reason: "payload_incomplete"},
+		{name: "operation denied by policy", query: "table=RUANGAN&operation=DELETE&source_found=true", reason: "operation_not_allowed"},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/recover/capabilities?"+test.query, nil)
+			req.Header.Set("Authorization", "Bearer write-token")
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, req)
+			var response map[string]interface{}
+			if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+				t.Fatalf("decode response: %v", err)
+			}
+			if rec.Code != http.StatusOK || response["operation_allowed"] != test.allowed {
+				t.Fatalf("response = %d %#v, want operation_allowed=%v", rec.Code, response, test.allowed)
+			}
+			if test.reason != "" && response["reason"] != test.reason {
+				t.Fatalf("reason = %#v, want %q", response["reason"], test.reason)
+			}
+		})
+	}
+}
+
 func TestCommandHandlerEnforcesBodyLimit(t *testing.T) {
 	handler := NewConfiguredHandler(nil, "recovery-token", true, "tenant-1", &CommandService{enabled: true, clientID: "tenant-1"}, 8, time.Second)
 	req := httptest.NewRequest(http.MethodPost, "/recover/RUANGAN/1019", strings.NewReader(`{"large":"payload"}`))

@@ -170,3 +170,79 @@ func (t CommandTablePolicy) allows(operation string) bool {
 	}
 	return false
 }
+
+func (p *CommandPolicySet) assessOperation(resourceTable, operation string, sourceFound bool, fields, changedFields []string) (bool, string) {
+	table, ok := p.table(resourceTable)
+	if !ok {
+		return false, "table_not_allowed"
+	}
+	operation = strings.ToUpper(strings.TrimSpace(operation))
+	if operation != "UPSERT" && operation != "DELETE" {
+		return false, "operation_not_allowed"
+	}
+	if !table.allows(operation) {
+		return false, "operation_not_allowed"
+	}
+	if operation == "DELETE" {
+		if !sourceFound {
+			return false, "recovery_not_required"
+		}
+		return true, ""
+	}
+
+	provided := make(map[string]struct{}, len(fields))
+	for _, rawField := range fields {
+		field, column, found := canonicalRecoveryField(table, rawField)
+		if !found || !column.State {
+			return false, "column_not_allowed"
+		}
+		if _, exists := provided[field]; exists {
+			return false, "payload_invalid"
+		}
+		provided[field] = struct{}{}
+	}
+	for field, column := range table.Columns {
+		if column.State {
+			if _, exists := provided[field]; !exists {
+				return false, "payload_incomplete"
+			}
+		}
+	}
+
+	if sourceFound {
+		for _, rawField := range changedFields {
+			field, column, found := canonicalRecoveryField(table, rawField)
+			if !found || !column.State {
+				return false, "column_not_allowed"
+			}
+			if _, exists := provided[field]; !exists {
+				return false, "payload_invalid"
+			}
+			if !column.Update || column.Immutable {
+				return false, "column_not_updateable"
+			}
+		}
+		return true, ""
+	}
+	for field, column := range table.Columns {
+		if column.State && !column.Insert {
+			return false, "column_not_insertable"
+		}
+		if column.State {
+			if _, exists := provided[field]; !exists {
+				return false, "payload_incomplete"
+			}
+		}
+	}
+	return true, ""
+}
+
+func canonicalRecoveryField(table CommandTablePolicy, raw string) (string, CommandColumnPolicy, bool) {
+	value := strings.TrimSpace(raw)
+	for field, column := range table.Columns {
+		if strings.EqualFold(field, value) || strings.EqualFold(column.DatabaseColumn, value) {
+			return field, column, true
+		}
+	}
+	return "", CommandColumnPolicy{}, false
+}

@@ -254,6 +254,12 @@ func (s *CommandService) validateCommand(tableName, recordID string, request Rec
 
 func validateDesiredState(table CommandTablePolicy, recordID string, desired map[string]interface{}) *CommandFailure {
 	for field, value := range desired {
+		if text, ok := value.(string); ok {
+			masked := strings.ToUpper(strings.TrimSpace(text))
+			if masked == "[REDACTED]" || masked == "***REDACTED***" {
+				return commandFailure(400, "desired_state_redacted", "redacted placeholders cannot be written to the client database")
+			}
+		}
 		column, ok := table.Columns[field]
 		if !ok || !column.State {
 			return commandFailure(403, "column_not_allowed", "desired_state contains a field outside the Agent recovery policy")
