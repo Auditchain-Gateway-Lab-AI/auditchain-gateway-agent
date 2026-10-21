@@ -307,7 +307,6 @@ tables:
     table: RUANGAN
     primary_key_field: id
     primary_key_column: ID
-    primary_key_type: string
     operations: [UPSERT, DELETE]
     columns:
       id:

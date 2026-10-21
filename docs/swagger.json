@@ -379,6 +379,40 @@
                 }
             }
         },
+        "/recover/capabilities": {
+            "get": {
+                "security": [
+                    {
+                        "BearerAuth": []
+                    }
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Recovery"
+                ],
+                "summary": "Check Agent Recovery write capability",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Resource table",
+                        "name": "table",
+                        "in": "query",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    }
+                }
+            }
+        },
         "/recover/{table}/{id}": {
             "post": {
                 "security": [

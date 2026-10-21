@@ -49,11 +49,56 @@ func NewConfiguredHandler(service *Service, recoveryToken string, enabled bool, 
 
 // ServeHTTP implements http.Handler for backward compatibility.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path == "/recover/capabilities" {
+		h.HandleCapabilities(w, r)
+		return
+	}
 	if strings.HasPrefix(r.URL.Path, "/recover/") {
 		h.HandleCommand(w, r)
 		return
 	}
 	h.HandleRecover(w, r)
+}
+
+// HandleCapabilities reports whether the separately authenticated write path
+// is enabled for one policy-mapped resource table. It does not inspect or
+// mutate a client row.
+// @Summary Check Agent Recovery write capability
+// @Tags Recovery
+// @Produce json
+// @Security BearerAuth
+// @Param table query string true "Resource table"
+// @Success 200 {object} map[string]interface{}
+// @Router /recover/capabilities [get]
+func (h *Handler) HandleCapabilities(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeCommandError(w, commandFailure(http.StatusMethodNotAllowed, "method_not_allowed", "GET is required"))
+		return
+	}
+	if !h.authorized(r) {
+		writeCommandError(w, commandFailure(http.StatusUnauthorized, "invalid_agent_token", "recovery token is invalid"))
+		return
+	}
+	table := strings.ToUpper(strings.TrimSpace(r.URL.Query().Get("table")))
+	if table == "" {
+		writeCommandError(w, commandFailure(http.StatusBadRequest, "invalid_payload", "table is required"))
+		return
+	}
+	ready := h.enabled && h.command != nil && h.command.enabled && h.command.policy != nil && h.clientID != ""
+	allowed := false
+	if ready {
+		_, allowed = h.command.policy.tables[table]
+	}
+	reason := ""
+	if !ready {
+		reason = "recovery_disabled"
+	} else if !allowed {
+		reason = "table_not_allowed"
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		"enabled": ready, "allowed": allowed, "reason": reason,
+	})
 }
 
 // HandleRecover handles POST /recover.

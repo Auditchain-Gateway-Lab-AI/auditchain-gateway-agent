@@ -1,0 +1,54 @@
+# Pilot write allowlist for the RUANGAN table only. Copy to recovery-policy.yml
+# after confirming these columns and permissions against the tenant Oracle DB.
+# The committed default recovery-policy.yml remains empty and disabled.
+version: 1
+tables:
+  - resource_table: RUANGAN
+    schema: POLINEMA
+    table: RUANGAN
+    primary_key_field: id
+    primary_key_column: ID
+    operations: [UPSERT]
+    columns:
+      id:
+        database_column: ID
+        state: true
+        insert: true
+        update: false
+        immutable: true
+      nama:
+        database_column: NAMA
+        state: true
+        insert: true
+        update: true
+      aktif:
+        database_column: AKTIF
+        state: true
+        insert: true
+        update: true
+      id_unit:
+        database_column: ID_UNIT
+        state: true
+        insert: true
+        update: true
+      created_at:
+        database_column: CREATED_AT
+        state: true
+        insert: true
+        update: false
+        immutable: true
+      updated_at:
+        database_column: UPDATED_AT
+        state: true
+        insert: true
+        update: true
+      user_input:
+        database_column: USER_INPUT
+        state: true
+        insert: true
+        update: false
+      user_updated:
+        database_column: USER_UPDATED
+        state: true
+        insert: true
+        update: true

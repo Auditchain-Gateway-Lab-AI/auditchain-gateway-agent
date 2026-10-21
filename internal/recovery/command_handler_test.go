@@ -58,6 +58,39 @@ func TestCommandHandlerRejectsDisabledWriteRoute(t *testing.T) {
 	if rec.Code != http.StatusForbidden || !strings.Contains(rec.Body.String(), "recovery_disabled") {
 		t.Fatalf("response = %d %s", rec.Code, rec.Body.String())
 	}
+	capabilityRequest := httptest.NewRequest(http.MethodGet, "/recover/capabilities?table=RUANGAN", nil)
+	capabilityRequest.Header.Set("Authorization", "Bearer recovery-token")
+	capabilityResponse := httptest.NewRecorder()
+	handler.ServeHTTP(capabilityResponse, capabilityRequest)
+	if capabilityResponse.Code != http.StatusOK || !strings.Contains(capabilityResponse.Body.String(), `"enabled":false`) {
+		t.Fatalf("capability = %d %s", capabilityResponse.Code, capabilityResponse.Body.String())
+	}
+}
+
+func TestRecoveryCapabilityRequiresWriteTokenAndReportsPolicy(t *testing.T) {
+	handler := NewConfiguredHandler(nil, "write-token", true, "tenant-1", &CommandService{
+		enabled: true, clientID: "tenant-1", policy: &CommandPolicySet{tables: map[string]CommandTablePolicy{"RUANGAN": {}}},
+	}, 1024, time.Second)
+	for _, test := range []struct {
+		token, table string
+		status       int
+		allowed      bool
+	}{
+		{"wrong-token", "RUANGAN", http.StatusUnauthorized, false},
+		{"write-token", "RUANGAN", http.StatusOK, true},
+		{"write-token", "USERS", http.StatusOK, false},
+	} {
+		req := httptest.NewRequest(http.MethodGet, "/recover/capabilities?table="+test.table, nil)
+		req.Header.Set("Authorization", "Bearer "+test.token)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != test.status {
+			t.Fatalf("status for %s = %d, want %d", test.table, rec.Code, test.status)
+		}
+		if test.status == http.StatusOK && strings.Contains(rec.Body.String(), `"allowed":true`) != test.allowed {
+			t.Fatalf("capability for %s = %s", test.table, rec.Body.String())
+		}
+	}
 }
 
 func TestCommandHandlerEnforcesBodyLimit(t *testing.T) {

@@ -15,6 +15,20 @@ func recoveryReadMapping(table string) (verify.ReadProjection, bool) {
 	return verify.ReadProjection{Schema: "POLINEMA", Table: "RUANGAN", PrimaryKey: "ID", StateColumns: []string{"ID", "NAMA"}}, true
 }
 
+func TestRuanganPilotPolicyMatchesCommittedReadProjection(t *testing.T) {
+	read, err := verify.LoadReadPolicy(filepath.Join("..", "..", "verify-policy.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy, err := LoadCommandPolicy(filepath.Join("..", "..", "recovery-policy.ruangan.example.yml"), read.ReadMapping)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := policy.tables["RUANGAN"]; !ok {
+		t.Fatal("RUANGAN pilot table missing")
+	}
+}
+
 func TestLoadCommandPolicyRequiresExactReadProjectionAndAllowlist(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "recovery-policy.yml")
 	validPolicy := `version: 1

@@ -547,6 +547,27 @@ paths:
       summary: Restore one source row using a verified Gateway command
       tags:
       - Recovery
+  /recover/capabilities:
+    get:
+      parameters:
+      - description: Resource table
+        in: query
+        name: table
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+      security:
+      - BearerAuth: []
+      summary: Check Agent Recovery write capability
+      tags:
+      - Recovery
   /table/{table}:
     get:
       consumes:
