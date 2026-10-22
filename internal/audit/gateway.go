@@ -1,4 +1,4 @@
-﻿package audit
+package audit
 
 import (
 	"bytes"
@@ -109,11 +109,12 @@ func (c *GatewayClient) GetLatestOffchainLog(ctx context.Context, resource strin
 	return &logs[0], nil
 }
 
-// VerifyMerkleRoot calls POST /api/agent/verify-merkle-root to verify root against blockchain.
-func (c *GatewayClient) VerifyMerkleRoot(ctx context.Context, merkleRoot, blockchainTxID string) (*VerifyMerkleRootResponse, error) {
+// VerifyMerkleRoot calls POST /api/agent/verify-merkle-root to reconstruct Merkle root from leafHash and verify against blockchain.
+func (c *GatewayClient) VerifyMerkleRoot(ctx context.Context, leafHash, merkleRoot, blockchainTxID string) (*VerifyMerkleRootResponse, error) {
 	endpoint := fmt.Sprintf("%s/api/agent/verify-merkle-root", c.baseURL)
 
 	payload := VerifyMerkleRootRequest{
+		LeafHash:       leafHash,
 		MerkleRoot:     merkleRoot,
 		BlockchainTxID: blockchainTxID,
 	}
