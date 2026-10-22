@@ -1,4 +1,4 @@
-﻿// Package audit implements the Agent-initiated outbound audit flow.
+// Package audit implements the Agent-initiated outbound audit flow.
 // It fetches offchain logs from the Gateway API, reads live client data
 // from the local Oracle database, compares hashes, and optionally verifies
 // Merkle roots against the blockchain via the Gateway.
@@ -26,6 +26,7 @@ type OffchainLog struct {
 
 // VerifyMerkleRootRequest is the body sent to POST /api/agent/verify-merkle-root.
 type VerifyMerkleRootRequest struct {
+	LeafHash       string `json:"leaf_hash,omitempty"`
 	MerkleRoot     string `json:"merkle_root"`
 	BlockchainTxID string `json:"blockchain_tx_id"`
 }
@@ -33,6 +34,8 @@ type VerifyMerkleRootRequest struct {
 // VerifyMerkleRootResponse is the response from POST /api/agent/verify-merkle-root.
 type VerifyMerkleRootResponse struct {
 	IsMatch            bool   `json:"is_match"`
+	LeafHash           string `json:"leaf_hash,omitempty"`
+	ReconstructedRoot  string `json:"reconstructed_root,omitempty"`
 	ExpectedMerkleRoot string `json:"expected_merkle_root"`
 	ActualMerkleRoot   string `json:"actual_merkle_root"`
 	BlockchainTxID     string `json:"blockchain_tx_id"`

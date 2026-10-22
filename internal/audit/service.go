@@ -262,7 +262,7 @@ func (s *Service) AuditSingleLog(ctx context.Context, logEntry OffchainLog, auto
 		return result
 	}
 
-	merkleResp, err := s.gateway.VerifyMerkleRoot(ctx, logEntry.MerkleRoot, *logEntry.BlockchainTxID)
+	merkleResp, err := s.gateway.VerifyMerkleRoot(ctx, result.ClientHash, logEntry.MerkleRoot, *logEntry.BlockchainTxID)
 	if err != nil {
 		result.BlockchainStatus = "ERROR"
 		result.Error = fmt.Sprintf("verify merkle root: %v", err)
