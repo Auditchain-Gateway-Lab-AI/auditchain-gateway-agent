@@ -3,6 +3,8 @@
 import (
 	"context"
 	"crypto/subtle"
+	"errors"
+	"github.com/golang-jwt/jwt/v5"
 	"encoding/json"
 	"net/http"
 	"strings"
@@ -11,15 +13,21 @@ import (
 
 // Handler serves the HTTP recovery endpoint.
 type Handler struct {
-	service *Service
-	token   string
+	service   *Service
+	token     string
+	jwtSecret string
 }
 
 // NewHandler creates a new HTTP Handler for recovery.
-func NewHandler(service *Service, token string) *Handler {
+func NewHandler(service *Service, token string, jwtSecret ...string) *Handler {
+	secret := ""
+	if len(jwtSecret) > 0 {
+		secret = jwtSecret[0]
+	}
 	return &Handler{
-		service: service,
-		token:   token,
+		service:   service,
+		token:     token,
+		jwtSecret: secret,
 	}
 }
 
@@ -118,14 +126,30 @@ func (h *Handler) HandleRecover(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) authorized(r *http.Request) bool {
-	if h.token == "" {
-		return true
-	}
 	authHeader := r.Header.Get("Authorization")
 	const prefix = "Bearer "
 	if !strings.HasPrefix(authHeader, prefix) {
-		return false
+		return h.token == "" && h.jwtSecret == ""
 	}
-	token := authHeader[len(prefix):]
-	return subtle.ConstantTimeCompare([]byte(token), []byte(h.token)) == 1
+	tokenString := strings.TrimSpace(authHeader[len(prefix):])
+
+	// 1. Coba verifikasi dengan JWT Secret jika dikonfigurasi
+	if h.jwtSecret != "" {
+		token, err := jwt.Parse(tokenString, func(t *jwt.Token) (interface{}, error) {
+			if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
+				return nil, errors.New("unexpected signing method")
+			}
+			return []byte(h.jwtSecret), nil
+		})
+		if err == nil && token.Valid {
+			return true
+		}
+	}
+
+	// 2. Cocokkan dengan static token jika ada
+	if h.token != "" && subtle.ConstantTimeCompare([]byte(tokenString), []byte(h.token)) == 1 {
+		return true
+	}
+
+	return h.token == "" && h.jwtSecret == ""
 }

@@ -12,6 +12,28 @@ import (
 	"time"
 )
 
+type contextKey string
+
+const callerTokenKey contextKey = "caller_token"
+
+// WithCallerToken attaches caller authorization token to context.
+func WithCallerToken(ctx context.Context, token string) context.Context {
+	return context.WithValue(ctx, callerTokenKey, token)
+}
+
+// CallerTokenFromContext retrieves caller authorization token from context.
+func CallerTokenFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	if v, ok := ctx.Value(callerTokenKey).(string); ok {
+		return v
+	}
+	return ""
+}
+
+
+
 // GatewayClient communicates with the auditchain-api gateway endpoints.
 type GatewayClient struct {
 	baseURL    string
@@ -23,6 +45,10 @@ type GatewayClient struct {
 func NewGatewayClient(baseURL, token string, timeout time.Duration) *GatewayClient {
 	if timeout <= 0 {
 		timeout = 15 * time.Second
+	}
+	baseURL = strings.TrimSpace(baseURL)
+	if baseURL != "" && !strings.HasPrefix(baseURL, "http://") && !strings.HasPrefix(baseURL, "https://") {
+		baseURL = "http://" + baseURL
 	}
 	baseURL = strings.TrimRight(baseURL, "/")
 	return &GatewayClient{
@@ -36,6 +62,9 @@ func NewGatewayClient(baseURL, token string, timeout time.Duration) *GatewayClie
 
 // GetOffchainLogs fetches audit logs within a time range from GET /api/agent/offchain-data.
 func (c *GatewayClient) GetOffchainLogs(ctx context.Context, from, to time.Time) ([]OffchainLog, error) {
+	if c.baseURL == "" {
+		return nil, fmt.Errorf("GATEWAY_URL belum dikonfigurasi di file .env agent (contoh: GATEWAY_URL=http://localhost:8080)")
+	}
 	endpoint := fmt.Sprintf("%s/api/agent/offchain-data?from=%s&to=%s",
 		c.baseURL,
 		url.QueryEscape(from.UTC().Format(time.RFC3339)),
@@ -73,6 +102,9 @@ func (c *GatewayClient) GetOffchainLogs(ctx context.Context, from, to time.Time)
 
 // GetLatestOffchainLog fetches the latest audit log for a specific resource (TABLE:ID).
 func (c *GatewayClient) GetLatestOffchainLog(ctx context.Context, resource string) (*OffchainLog, error) {
+	if c.baseURL == "" {
+		return nil, fmt.Errorf("GATEWAY_URL belum dikonfigurasi di file .env agent (contoh: GATEWAY_URL=http://localhost:8080)")
+	}
 	escapedResource := url.PathEscape(strings.TrimPrefix(resource, "/"))
 	endpoint := fmt.Sprintf("%s/api/agent/offchain-data/%s", c.baseURL, escapedResource)
 
@@ -111,6 +143,9 @@ func (c *GatewayClient) GetLatestOffchainLog(ctx context.Context, resource strin
 
 // VerifyMerkleRoot calls POST /api/agent/verify-merkle-root to reconstruct Merkle root from leafHash and verify against blockchain.
 func (c *GatewayClient) VerifyMerkleRoot(ctx context.Context, leafHash, merkleRoot, blockchainTxID string) (*VerifyMerkleRootResponse, error) {
+	if c.baseURL == "" {
+		return nil, fmt.Errorf("GATEWAY_URL belum dikonfigurasi di file .env agent (contoh: GATEWAY_URL=http://localhost:8080)")
+	}
 	endpoint := fmt.Sprintf("%s/api/agent/verify-merkle-root", c.baseURL)
 
 	payload := VerifyMerkleRootRequest{
@@ -155,11 +190,15 @@ func (c *GatewayClient) VerifyMerkleRoot(ctx context.Context, leafHash, merkleRo
 }
 
 func (c *GatewayClient) setHeaders(req *http.Request) {
-	if c.token != "" {
-		if strings.HasPrefix(c.token, "Bearer ") {
-			req.Header.Set("Authorization", c.token)
+	token := CallerTokenFromContext(req.Context())
+	if token == "" {
+		token = c.token
+	}
+	if token != "" {
+		if strings.HasPrefix(token, "Bearer ") {
+			req.Header.Set("Authorization", token)
 		} else {
-			req.Header.Set("Authorization", "Bearer "+c.token)
+			req.Header.Set("Authorization", "Bearer "+token)
 		}
 	}
 }
@@ -167,6 +206,9 @@ func (c *GatewayClient) setHeaders(req *http.Request) {
 
 // SubmitAuditReport sends the completed audit report to POST /api/agent/audit-report on the Gateway.
 func (c *GatewayClient) SubmitAuditReport(ctx context.Context, report *Report) error {
+	if c.baseURL == "" {
+		return fmt.Errorf("GATEWAY_URL belum dikonfigurasi di file .env agent (contoh: GATEWAY_URL=http://localhost:8080)")
+	}
 	endpoint := fmt.Sprintf("%s/api/agent/audit-report", c.baseURL)
 
 	payloadBytes, err := json.Marshal(report)

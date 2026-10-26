@@ -4,6 +4,8 @@ import (
 	"context"
 	"log"
 	"crypto/subtle"
+	"errors"
+	"github.com/golang-jwt/jwt/v5"
 	"encoding/json"
 	"net/http"
 	"net/url"
@@ -14,15 +16,21 @@ import (
 
 // Handler serves HTTP endpoints for the audit module.
 type Handler struct {
-	service *Service
-	token   string
+	service   *Service
+	token     string
+	jwtSecret string
 }
 
 // NewHandler creates a new HTTP Handler for audit operations.
-func NewHandler(service *Service, token string) *Handler {
+func NewHandler(service *Service, token string, jwtSecret ...string) *Handler {
+	secret := ""
+	if len(jwtSecret) > 0 {
+		secret = jwtSecret[0]
+	}
 	return &Handler{
-		service: service,
-		token:   token,
+		service:   service,
+		token:     token,
+		jwtSecret: secret,
 	}
 }
 
@@ -63,7 +71,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // @Router /audit/run [post]
 // @Router /audit/run [get]
 func (h *Handler) HandleRun(w http.ResponseWriter, r *http.Request) {
-	if !h.authorized(r) {
+	callerToken, ok := h.authorized(r)
+	if !ok {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
@@ -93,6 +102,9 @@ func (h *Handler) HandleRun(w http.ResponseWriter, r *http.Request) {
 
 	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
 	defer cancel()
+	if callerToken != "" {
+		ctx = WithCallerToken(ctx, callerToken)
+	}
 
 	// If resource is specified, audit single resource
 	if resource != "" {
@@ -160,7 +172,8 @@ func (h *Handler) HandleRun(w http.ResponseWriter, r *http.Request) {
 // @Failure 500 {string} string "Internal Server Error"
 // @Router /audit/resource/{resource} [get]
 func (h *Handler) HandleAuditResource(w http.ResponseWriter, r *http.Request) {
-	if !h.authorized(r) {
+	callerToken, ok := h.authorized(r)
+	if !ok {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
@@ -185,6 +198,9 @@ func (h *Handler) HandleAuditResource(w http.ResponseWriter, r *http.Request) {
 
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
+	if callerToken != "" {
+		ctx = WithCallerToken(ctx, callerToken)
+	}
 
 	res, err := h.service.AuditResource(ctx, resource, autoRecover)
 	if err != nil {
@@ -207,17 +223,41 @@ func (h *Handler) HandleHealth(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "module": "audit"})
 }
 
-func (h *Handler) authorized(r *http.Request) bool {
-	if h.token == "" {
-		return true
-	}
+func (h *Handler) authorized(r *http.Request) (string, bool) {
 	authHeader := r.Header.Get("Authorization")
 	const prefix = "Bearer "
 	if !strings.HasPrefix(authHeader, prefix) {
-		return false
+		if h.token == "" && h.jwtSecret == "" {
+			return "", true
+		}
+		return "", false
 	}
-	token := authHeader[len(prefix):]
-	return subtle.ConstantTimeCompare([]byte(token), []byte(h.token)) == 1
+	tokenString := strings.TrimSpace(authHeader[len(prefix):])
+
+	// 1. Validasi JWT token jika jwtSecret dikonfigurasi
+	if h.jwtSecret != "" {
+		token, err := jwt.Parse(tokenString, func(t *jwt.Token) (interface{}, error) {
+			if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
+				return nil, errors.New("unexpected signing method")
+			}
+			return []byte(h.jwtSecret), nil
+		})
+		if err == nil && token.Valid {
+			return tokenString, true
+		}
+	}
+
+	// 2. Cocokkan dengan static token jika ada
+	if h.token != "" && subtle.ConstantTimeCompare([]byte(tokenString), []byte(h.token)) == 1 {
+		return tokenString, true
+	}
+
+	// 3. Jika tidak ada secret maupun token yang dikonfigurasi, izinkan
+	if h.token == "" && h.jwtSecret == "" {
+		return tokenString, true
+	}
+
+	return "", false
 }
 
 func writeJSON(w http.ResponseWriter, status int, data interface{}) {
