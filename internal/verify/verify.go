@@ -3,6 +3,7 @@ package verify
 import (
 	"context"
 	"crypto/subtle"
+	"github.com/golang-jwt/jwt/v5"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -90,6 +91,7 @@ type ResourceRecord struct {
 type Server struct {
 	db                   *sql.DB
 	verifyToken          string
+	jwtSecret            string
 	port                 string
 	recoveryHandler      http.Handler
 	auditHandler         http.Handler
@@ -884,15 +886,32 @@ func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) authorized(r *http.Request) bool {
-	if s.verifyToken == "" {
-		return true
-	}
 	header := r.Header.Get("Authorization")
 	prefix := "Bearer "
-	if len(header) != len(prefix)+len(s.verifyToken) || !strings.HasPrefix(header, prefix) {
-		return false
+	if !strings.HasPrefix(header, prefix) {
+		return s.verifyToken == "" && s.jwtSecret == ""
 	}
-	return subtle.ConstantTimeCompare([]byte(header[len(prefix):]), []byte(s.verifyToken)) == 1
+	tokenString := strings.TrimSpace(header[len(prefix):])
+
+	// 1. Coba verifikasi dengan JWT Secret jika dikonfigurasi
+	if s.jwtSecret != "" {
+		token, err := jwt.Parse(tokenString, func(t *jwt.Token) (interface{}, error) {
+			if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
+				return nil, errors.New("unexpected signing method")
+			}
+			return []byte(s.jwtSecret), nil
+		})
+		if err == nil && token.Valid {
+			return true
+		}
+	}
+
+	// 2. Cocokkan dengan static token jika ada
+	if s.verifyToken != "" && subtle.ConstantTimeCompare([]byte(tokenString), []byte(s.verifyToken)) == 1 {
+		return true
+	}
+
+	return s.verifyToken == "" && s.jwtSecret == ""
 }
 
 func (s *Server) writeJSON(w http.ResponseWriter, status int, value any) {
@@ -1130,4 +1149,10 @@ func (s *Server) queryTablePage(ctx context.Context, tableName string, limit int
 	}
 
 	return records
+}
+
+
+// SetJWTSecret mengonfigurasi shared secret JWT dari Gateway.
+func (s *Server) SetJWTSecret(secret string) {
+	s.jwtSecret = secret
 }

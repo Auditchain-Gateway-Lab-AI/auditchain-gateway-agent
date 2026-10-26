@@ -88,6 +88,10 @@ func main() {
 	verifyToken := cfg.VerifyToken()
 	verifyPort := getEnv("AGENT_VERIFY_PORT", "9090")
 	verifyServer := verify.NewServer(db, verifyToken, verifyPort)
+	if cfg.JWTSecret != "" {
+		verifyServer.SetJWTSecret(cfg.JWTSecret)
+		log.Println("🔑 Shared JWT Authentication aktif (menggunakan JWT_SECRET dari Gateway)")
+	}
 	verifyServer.SetAuditTrailProjection(verify.AuditTrailProjection{
 		Schema: strings.TrimSpace(os.Getenv("AGENT_AUDIT_TRAIL_SCHEMA")),
 		Table:  getEnv("AGENT_AUDIT_TRAIL_TABLE", "AUDIT_TRAIL"),
@@ -113,10 +117,10 @@ func main() {
 		if verifyPolicy != nil {
 			recoveryService.SetReadProjection(verifyPolicy.ReadMapping)
 		}
-		verifyServer.SetRecoveryHandler(recovery.NewHandler(recoveryService, verifyToken))
+		verifyServer.SetRecoveryHandler(recovery.NewHandler(recoveryService, verifyToken, cfg.JWTSecret))
 		log.Println("✅ Modul Recovery aktif di endpoint /recover/")
 	} else {
-		verifyServer.SetRecoveryHandler(recovery.NewHandler(nil, verifyToken))
+		verifyServer.SetRecoveryHandler(recovery.NewHandler(nil, verifyToken, cfg.JWTSecret))
 	}
 
 	// Inisialisasi Modul Audit (Outbound Verification)
@@ -141,7 +145,7 @@ func main() {
 		recoveryExecutor,
 	)
 
-	auditHandler := audit.NewHandler(auditService, verifyToken)
+	auditHandler := audit.NewHandler(auditService, verifyToken, cfg.JWTSecret)
 	verifyServer.SetAuditHandler(auditHandler)
 	log.Println("✅ Modul Audit (Outbound Verification) aktif di /audit/")
 

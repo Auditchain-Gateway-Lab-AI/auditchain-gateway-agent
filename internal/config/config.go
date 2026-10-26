@@ -10,6 +10,7 @@ import (
 )
 
 type Config struct {
+	JWTSecret string
 	Client   ClientConfig
 	SourceDB SourceDBConfig
 	Gateway  GatewayConfig
@@ -90,6 +91,7 @@ func Load(configPath string) (*Config, error) {
 	cfg.Recovery.Enabled = recoveryEnabled
 	cfg.Recovery.ClientID = getEnv("AGENT_CLIENT_ID", "")
 	cfg.Recovery.Token = getEnv("AGENT_RECOVERY_TOKEN", "")
+	cfg.JWTSecret = getEnv("JWT_SECRET", "")
 
 	return &cfg, nil
 }
