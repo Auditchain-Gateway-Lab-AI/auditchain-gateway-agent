@@ -143,15 +143,18 @@ func (h *Handler) HandleRun(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Kirim report ke Gateway secara asinkron agar statistik dashboard segera ter-update
-	go func(rep *Report) {
+	go func(rep *Report, callerTok string) {
 		submitCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
+		if callerTok != "" {
+			submitCtx = WithCallerToken(submitCtx, callerTok)
+		}
 		if err := h.service.SubmitReport(submitCtx, rep); err != nil {
 			log.Printf("[AuditHandler] Gagal mengirim audit report ke Gateway: %v", err)
 		} else {
 			log.Printf("[AuditHandler] Berhasil mengirim audit report ke Gateway (RunID: %s)", rep.RunID)
 		}
-	}(report)
+	}(report, callerToken)
 
 	writeJSON(w, http.StatusOK, report)
 }
