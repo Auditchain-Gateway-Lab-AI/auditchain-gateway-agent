@@ -224,15 +224,23 @@ func (h *Handler) HandleHealth(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) authorized(r *http.Request) (string, bool) {
-	authHeader := r.Header.Get("Authorization")
-	const prefix = "Bearer "
-	if !strings.HasPrefix(authHeader, prefix) {
+	authHeader := strings.TrimSpace(r.Header.Get("Authorization"))
+	if authHeader == "" {
 		if h.token == "" && h.jwtSecret == "" {
 			return "", true
 		}
+		log.Println("⚠️ [AgentAuth] Header Authorization kosong")
 		return "", false
 	}
-	tokenString := strings.TrimSpace(authHeader[len(prefix):])
+
+	tokenString := authHeader
+	if strings.HasPrefix(tokenString, "Bearer ") {
+		tokenString = strings.TrimSpace(strings.TrimPrefix(tokenString, "Bearer "))
+	}
+	// Tangani kasus user di Apidog mengetik kata 'Bearer ' ganda
+	if strings.HasPrefix(tokenString, "Bearer ") {
+		tokenString = strings.TrimSpace(strings.TrimPrefix(tokenString, "Bearer "))
+	}
 
 	// 1. Validasi JWT token jika jwtSecret dikonfigurasi
 	if h.jwtSecret != "" {
@@ -245,6 +253,11 @@ func (h *Handler) authorized(r *http.Request) (string, bool) {
 		if err == nil && token.Valid {
 			return tokenString, true
 		}
+		if err != nil {
+			log.Printf("⚠️ [AgentAuth] Validasi JWT gagal: %v (pastikan JWT_SECRET di Agent sama persis dengan Gateway)", err)
+		}
+	} else if strings.HasPrefix(tokenString, "eyJ") {
+		log.Println("⚠️ [AgentAuth] Request membawa JWT token tetapi JWT_SECRET belum dikonfigurasi di file .env Agent")
 	}
 
 	// 2. Cocokkan dengan static token jika ada
@@ -257,6 +270,7 @@ func (h *Handler) authorized(r *http.Request) (string, bool) {
 		return tokenString, true
 	}
 
+	log.Printf("⚠️ [AgentAuth] Akses ditolak: token tidak cocok dengan JWT_SECRET maupun AGENT_VERIFY_TOKEN (panjang token=%d)", len(tokenString))
 	return "", false
 }
 
