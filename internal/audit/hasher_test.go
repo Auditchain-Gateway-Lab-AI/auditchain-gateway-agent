@@ -1,7 +1,8 @@
-﻿package audit
+package audit
 
 import (
 	"testing"
+	"time"
 )
 
 func TestExtractOffchainState(t *testing.T) {
@@ -67,6 +68,41 @@ func TestCompareState_Match(t *testing.T) {
 	}
 	if clientHash != offchainHash {
 		t.Fatalf("hashes should match: client=%s, offchain=%s", clientHash, offchainHash)
+	}
+}
+
+func TestCompareState_TimestampNormalization(t *testing.T) {
+	clientID := "67e493e9-f7a1-441a-8229-f688cb876fd2"
+	resource := "RUANGAN:1516"
+	action := "UPDATE"
+
+	// Debezium metadata with epoch microseconds
+	metadata := `{"ID": 1516, "NAMA": "PW-RUANGAN", "CREATED_AT": 1792732263000000, "UPDATED_AT": 1793082776000000}`
+
+	// Client database returns time.Time
+	createdAt, _ := time.Parse(time.RFC3339, "2026-10-23T05:11:03Z")
+	updatedAt, _ := time.Parse(time.RFC3339, "2026-10-27T06:32:56Z")
+	clientData := map[string]interface{}{
+		"ID":         1516,
+		"NAMA":       "PW-RUANGAN",
+		"CREATED_AT": createdAt,
+		"UPDATED_AT": updatedAt,
+	}
+
+	clientHash, offchainHash, isMatch, discrepancies, err := CompareState(
+		clientID, resource, action, clientData, true, metadata,
+	)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !isMatch {
+		t.Fatalf("expected match with timestamp normalization, got discrepancies: %+v", discrepancies)
+	}
+	if clientHash != offchainHash {
+		t.Fatalf("hashes should match: client=%s, offchain=%s", clientHash, offchainHash)
+	}
+	if len(discrepancies) != 0 {
+		t.Fatalf("expected 0 discrepancies, got: %+v", discrepancies)
 	}
 }
 

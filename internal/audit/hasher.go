@@ -1,11 +1,13 @@
-﻿package audit
+package audit
 
 import (
 	"encoding/json"
 	"fmt"
 	"io"
 	"reflect"
+	"strconv"
 	"strings"
+	"time"
 
 	"auditchain-agent/internal/canonicalstate"
 )
@@ -83,15 +85,20 @@ func CompareState(clientID, resource, action string, clientData map[string]inter
 			})
 			continue
 		}
-		clientProjected[k] = actualVal
 
 		// Check value equality for discrepancy report
 		if !areValuesEquivalent(expectedVal, actualVal) {
+			clientProjected[k] = actualVal
 			discrepancies = append(discrepancies, Discrepancy{
 				Field:    k,
 				Expected: expectedVal,
 				Actual:   actualVal,
 			})
+		} else {
+			// Values are equivalent (e.g. identical primitives, or matching timestamps with different formats).
+			// Use expectedVal in clientProjected so that its representation matches expectedState exactly,
+			// ensuring clientHash == offchainHash.
+			clientProjected[k] = expectedVal
 		}
 	}
 
@@ -152,5 +159,82 @@ func areValuesEquivalent(a, b interface{}) bool {
 		return true
 	}
 
+	// Timestamp comparison (handles Debezium epoch microseconds vs Go time.Time / RFC3339 string)
+	if tA, okA := parseTimestamp(a); okA {
+		if tB, okB := parseTimestamp(b); okB {
+			diff := tA.Sub(tB)
+			if diff < 0 {
+				diff = -diff
+			}
+			if diff < time.Second {
+				return true
+			}
+		}
+	}
+
 	return reflect.DeepEqual(a, b)
+}
+
+func parseTimestamp(v any) (time.Time, bool) {
+	if v == nil {
+		return time.Time{}, false
+	}
+
+	switch val := v.(type) {
+	case time.Time:
+		return val.UTC(), true
+	case json.Number:
+		if n, err := val.Int64(); err == nil {
+			return parseEpoch(n)
+		}
+		if f, err := val.Float64(); err == nil {
+			return parseEpoch(int64(f))
+		}
+	case int64:
+		return parseEpoch(val)
+	case int:
+		return parseEpoch(int64(val))
+	case int32:
+		return parseEpoch(int64(val))
+	case uint64:
+		return parseEpoch(int64(val))
+	case float64:
+		return parseEpoch(int64(val))
+	case string:
+		s := strings.TrimSpace(val)
+		if s == "" {
+			return time.Time{}, false
+		}
+		layouts := []string{
+			time.RFC3339Nano,
+			time.RFC3339,
+			"2006-01-02T15:04:05.999999999Z07:00",
+			"2006-01-02T15:04:05Z07:00",
+			"2006-01-02T15:04:05",
+			"2006-01-02 15:04:05.999999999",
+			"2006-01-02 15:04:05",
+			"2006-01-02",
+		}
+		for _, layout := range layouts {
+			if t, err := time.Parse(layout, s); err == nil {
+				return t.UTC(), true
+			}
+		}
+		if n, err := strconv.ParseInt(s, 10, 64); err == nil {
+			return parseEpoch(n)
+		}
+	}
+
+	return time.Time{}, false
+}
+
+func parseEpoch(n int64) (time.Time, bool) {
+	if n > 100_000_000_000_000 { // Microseconds (> 1e14, e.g. Debezium io.debezium.time.MicroTimestamp)
+		return time.UnixMicro(n).UTC(), true
+	} else if n > 100_000_000_000 { // Milliseconds (> 1e11)
+		return time.UnixMilli(n).UTC(), true
+	} else if n > 100_000_000 { // Seconds (> 1e8)
+		return time.Unix(n, 0).UTC(), true
+	}
+	return time.Time{}, false
 }

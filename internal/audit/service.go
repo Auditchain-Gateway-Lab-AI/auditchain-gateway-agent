@@ -262,7 +262,11 @@ func (s *Service) AuditSingleLog(ctx context.Context, logEntry OffchainLog, auto
 		return result
 	}
 
-	merkleResp, err := s.gateway.VerifyMerkleRoot(ctx, result.ClientHash, logEntry.MerkleRoot, *logEntry.BlockchainTxID)
+	leafToVerify := logEntry.HashValue
+	if leafToVerify == "" {
+		leafToVerify = result.ClientHash
+	}
+	merkleResp, err := s.gateway.VerifyMerkleRoot(ctx, leafToVerify, logEntry.MerkleRoot, *logEntry.BlockchainTxID)
 	if err != nil {
 		result.BlockchainStatus = "ERROR"
 		result.Error = fmt.Sprintf("verify merkle root: %v", err)
