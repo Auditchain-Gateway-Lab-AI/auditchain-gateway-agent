@@ -1,4 +1,4 @@
-﻿package recovery
+package recovery
 
 import (
 	"context"
@@ -77,6 +77,10 @@ func (s *Service) RecoverRow(ctx context.Context, table, recordID string, data m
 		if strings.EqualFold(colName, pkCol) {
 			continue // Skip PK in updates
 		}
+		// On UPDATE, skip creation metadata columns if row already exists
+		if rowExists && (strings.EqualFold(colName, "CREATED_AT") || strings.EqualFold(colName, "USER_INPUT")) {
+			continue
+		}
 		if sqlident.IsValid(colName) {
 			cols = append(cols, colName)
 		}
@@ -109,7 +113,7 @@ func (s *Service) RecoverRow(ctx context.Context, table, recordID string, data m
 
 		for i, col := range cols {
 			setClauses = append(setClauses, fmt.Sprintf("%s = :%d", sqlident.Quote(col), i+1))
-			args = append(args, oracleValue(findValue(data, col)))
+			args = append(args, oracleValue(col, findValue(data, col)))
 		}
 		args = append(args, recordID)
 
@@ -144,7 +148,7 @@ func (s *Service) RecoverRow(ctx context.Context, table, recordID string, data m
 		for _, col := range cols {
 			insertCols = append(insertCols, sqlident.Quote(col))
 			placeholders = append(placeholders, fmt.Sprintf(":%d", len(args)+1))
-			args = append(args, oracleValue(findValue(data, col)))
+			args = append(args, oracleValue(col, findValue(data, col)))
 		}
 
 		insertQuery := fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s)",
@@ -227,19 +231,74 @@ func findValue(data map[string]interface{}, colName string) interface{} {
 	return nil
 }
 
-func oracleValue(value interface{}) interface{} {
+func oracleValue(colName string, value interface{}) interface{} {
 	if value == nil {
 		return nil
 	}
-	switch v := value.(type) {
-	case json.Number:
-		if i, err := v.Int64(); err == nil {
-			return i
+
+	// Unwrap json.Number if present
+	if num, ok := value.(json.Number); ok {
+		if i, err := num.Int64(); err == nil {
+			value = i
+		} else if f, err := num.Float64(); err == nil {
+			value = f
+		} else {
+			value = num.String()
 		}
-		if f, err := v.Float64(); err == nil {
-			return f
+	}
+
+	upperCol := strings.ToUpper(colName)
+	isTimestampCol := strings.HasSuffix(upperCol, "_AT") ||
+		strings.HasSuffix(upperCol, "_DATE") ||
+		strings.HasSuffix(upperCol, "_TIME") ||
+		strings.Contains(upperCol, "TANGGAL") ||
+		upperCol == "CREATED_AT" || upperCol == "UPDATED_AT"
+
+	if isTimestampCol {
+		switch v := value.(type) {
+		case int64:
+			if v > 100000000000000 { // Microseconds (> 1e14)
+				return time.UnixMicro(v).UTC()
+			} else if v > 100000000000 { // Milliseconds (> 1e11)
+				return time.UnixMilli(v).UTC()
+			} else if v > 100000000 { // Seconds (> 1e8)
+				return time.Unix(v, 0).UTC()
+			}
+		case int:
+			if int64(v) > 100000000 {
+				return time.Unix(int64(v), 0).UTC()
+			}
+		case float64:
+			if v > 100000000000000 {
+				return time.UnixMicro(int64(v)).UTC()
+			} else if v > 100000000000 {
+				return time.UnixMilli(int64(v)).UTC()
+			} else if v > 100000000 {
+				return time.Unix(int64(v), 0).UTC()
+			}
+		case string:
+			str := strings.TrimSpace(v)
+			if str == "" {
+				return nil
+			}
+			layouts := []string{
+				time.RFC3339Nano,
+				time.RFC3339,
+				"2006-01-02 15:04:05.999999999",
+				"2006-01-02 15:04:05",
+				"2006-01-02",
+			}
+			for _, layout := range layouts {
+				if t, err := time.Parse(layout, str); err == nil {
+					return t.UTC()
+				}
+			}
+		case time.Time:
+			return v.UTC()
 		}
-		return v.String()
+	}
+
+	switch value.(type) {
 	case string, bool,
 		int, int8, int16, int32, int64,
 		uint, uint8, uint16, uint32, uint64,
